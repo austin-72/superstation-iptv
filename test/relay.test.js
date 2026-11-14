@@ -41,7 +41,10 @@ function provider() {
 }
 async function startRelay(env, script) {
   const port = await freePort();
-  const p = spawn(process.execPath, [script || path.join(__dirname, '..', 'relay', 'relay.js')], { env: { ...process.env, RELAY_SECRET: SECRET, PORT: String(port), ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // (A folder of its own for each: whole films are kept across restarts now, so one shared folder would carry films
+  // from one test into the next.)
+  const cache = env && env.RELAY_CACHE_DIR ? {} : { RELAY_CACHE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'relay-cache-')) };
+  const p = spawn(process.execPath, [script || path.join(__dirname, '..', 'relay', 'relay.js')], { env: { ...process.env, RELAY_SECRET: SECRET, PORT: String(port), ...cache, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
   p.stderr.on('data', (d) => { out += d; });
@@ -441,7 +444,9 @@ test('the real server: relay addresses for direct streams, per list, for other a
     assert.ok(!reach.relay && reach.url.includes('s3cret'));
     // With it (for every list): sealed relay addresses that play.
     let s = (await api('PUT', '/api/admin/settings', { relay: { url: r.base + '/' } })).body;
-    assert.deepStrictEqual(s.relay, { url: r.base, all: true, hasSecret: true, proxy: '' }, 'the secret is never shown here');
+    const { cfg, ...rest } = s.relay;
+    assert.deepStrictEqual(rest, { url: r.base, all: true, hasSecret: true, proxy: '' }, 'the secret is never shown here');
+    assert.strictEqual(cfg.mode, 'disk', 'how it handles films: as it always has, until the admin changes it');
     const secret = (await api('GET', '/api/admin/relay/secret')).body.secret;
     assert.ok(secret.length >= 30);
     // (The relay was started with another secret: the test says so.)
@@ -601,7 +606,7 @@ test('relay 5: films of one account share its connections (everyone kept ahead),
     assert.ok(ra.got >= SIZE / 60 * 8 && rb.got >= SIZE / 60 * 6, `both kept playing (${(ra.got / MB).toFixed(1)} MB and ${(rb.got / MB).toFixed(1)} MB)`);
     assert.ok(ra.longest < 2500 && rb.longest < 2500, `no long waits (${ra.longest} ms, ${rb.longest} ms)`);
     let d = await downloads();
-    assert.strictEqual(d.version, '7');
+    assert.strictEqual(d.version, '8');
     assert.strictEqual(d.accounts.acc1.budget, 1);
     assert.ok(!d.strain.some((e) => e.a === 'acc1'), 'it kept up: ' + JSON.stringify(d.strain));
 

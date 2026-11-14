@@ -59,7 +59,7 @@ const P = require('./lib/parse');
 const { xmlEsc, fmtTime } = require('./lib/xmltv');
 const { HttpError, sendJSON, sendText, readBody, readJSON, isUrl, clampInt, log, isGuestId } = require('./lib/util');
 const { ErrorReports, scrub } = require('./lib/errors');
-const { makeRelay, testRelay, testRelayProxy, newSecret, relayDownloads, updateRelay, bundledRelay, playId, acctId } = require('./lib/streamrelay');
+const { makeRelay, testRelay, testRelayProxy, newSecret, relayDownloads, updateRelay, bundledRelay, playId, acctId, relayCfg, relayWire, pushRelaySettings, clearRelay } = require('./lib/streamrelay');
 const frontLink = require('./lib/front'); // (telling the front when this server is about to stop)
 
 let L = { names: {}, list: () => [] };
@@ -479,7 +479,8 @@ function inputOf(it, alt = -1, overrideUrl = '', { raw = false } = {}) {
     // Films and episodes (one file, not HLS): from the relay's own copy of the whole film — the same one devices play
     // from — so a film is fetched from the provider once, at full speed, the conversion starts on what's already
     // there and seeks within it straight away, and the provider connection is free again once it's all in.
-    const whole = (it.t === 'movie' || it.t === 'episode') && !overrideUrl && !/^(hls|dash)$/.test(kindOfUrl(u))
+    // (Unless the admin chose to have the relay just pass films or episodes on: Admin → Stream relay.)
+    const whole = (it.t === 'movie' || it.t === 'episode') && relayOf.diskFor(it.t) && !overrideUrl && !/^(hls|dash)$/.test(kindOfUrl(u))
       ? { whole: true, k: it.k, alt, list: alt >= 0 && it.alts && it.alts[alt] ? it.alts[alt].l : it.src, len: it.d || 0 } : null;
     return { input: relayWrapped(u, h, whole), headers: {}, viaRelay: true, raw: u, whole: !!whole };
   }
@@ -1594,7 +1595,7 @@ async function reachOf(req, it, b) {
     const finite = it.t === 'movie' || it.t === 'episode' || it.t === 'catchup' || !!(info && info.finite);
     // Films and episodes (one file, not HLS): the relay fetches them whole onto its disk and plays them from there, so
     // seeking is instant and the provider connection is free again once it's all there (see relayFinished below).
-    const whole = (it.t === 'movie' || it.t === 'episode') && kind !== 'hls' ? { whole: true, k: it.k, alt, list: srcList(it, alt), len: it.d || 0 } : null;
+    const whole = (it.t === 'movie' || it.t === 'episode') && relayOf.diskFor(it.t) && kind !== 'hls' ? { whole: true, k: it.k, alt, list: srcList(it, alt), len: it.d || 0 } : null;
     const out = { kind, finite, mse: true, url: relayOf.wrap(raw, headers, whole), blocked: '', split: false, splitUrl: '', relay: true, alt: null };
     // Xtream live channels in MPEG-TS are also served as HLS (better on phones and TVs): that through the relay too.
     const xh = it.t === 'live' && kind === 'ts' ? xtreamHls(raw) : '';
@@ -1722,6 +1723,8 @@ const relayFinished = (() => {
     try {
       const j = await relayDownloads(r.url, r.secret, [...ids], fetch, { budget: Date.now() - bootAt > 60000 ? budgets() : null, since: seq, full: true });
       if (!j) return;
+      // (A relay 8 whose settings aren't the admin's — it restarted without its folder, or missed a change: sent again.)
+      if (Number(j.version) >= 8 && j.cfg !== relayWire(r).tag && Date.now() - relayPushed.at > 60e3) relaySettingsPush().catch(() => {});
       const next = new Set();
       for (const f of j.films) if (f.done) for (const i of f.ids || []) next.add(i);
       done = next;
@@ -1760,7 +1763,7 @@ const relayFinished = (() => {
     pooled: (pl) => { if (!v5 || !isFilm(pl)) return false; return serving.has(playId(pl.k, Number.isInteger(pl.alt) ? pl.alt : -1)); },
     /** Whether a new film from this list would join the relay's shared connections (not an HLS one: those aren't whole). */
     joins: (it, alt) => {
-      if (!v5 || !(it.t === 'movie' || it.t === 'episode') || !relayOf.uses(srcList(it, alt))) return false;
+      if (!v5 || !(it.t === 'movie' || it.t === 'episode') || !relayOf.uses(srcList(it, alt)) || !relayOf.diskFor(it.t)) return false;
       const u = alt >= 0 && it.alts && it.alts[alt] ? it.alts[alt].u : it.u;
       return kindOfUrl(u) !== 'hls';
     },
@@ -2836,6 +2839,7 @@ route('PUT', '/api/admin/settings', async (req, res, p, q, ctx) => {
   requireAdmin(ctx);
   const b = await readJSON(req);
   const s = settings();
+  let relayPushSoon = false; // (the relay's settings changed: sent to it once saved)
   const num = (k, min, max) => { if (k in b) s[k] = clampInt(b[k], min, max, s[k]); };
   // (Plain printable characters only: a curly quote or a line break pasted in made every request to a provider fail.)
   if (typeof b.userAgent === 'string') {
@@ -2903,6 +2907,8 @@ route('PUT', '/api/admin/settings', async (req, res, p, q, ctx) => {
     if (b.relay.newSecret || (r.url && !r.secret)) r.secret = newSecret();
     if ('all' in b.relay) r.all = !!b.relay.all;
     if ('proxy' in b.relay) { const v = String(b.relay.proxy || ''); r.proxy = v === 'list' || (s.proxies || []).some((x) => x.id === v) ? v : ''; }
+    // How it handles films and episodes (made safe by relayCfg; sent to the relay below, once saved).
+    if (b.relay.cfg && typeof b.relay.cfg === 'object') { r.cfg = relayCfg({ cfg: { ...relayCfg(r), ...b.relay.cfg } }); relayPushSoon = true; }
     s.relay = r;
   }
   if (typeof b.directAddress === 'string') {
@@ -2923,7 +2929,9 @@ route('PUT', '/api/admin/settings', async (req, res, p, q, ctx) => {
   if (smartChanged) { smartRetag('settings'); smartTrending(); if (!enrichJob) setTimeout(() => { try { startEnrich(true); } catch {} }, 5000); }
   if ('hiddenGroups' in b || 'hiddenKeys' in b || 'defaultLangs' in b || 'showUnknownLang' in b || 'groupRules' in b || 'tidyGroups' in b || 'tmdbTitles' in b || 'noAdult' in b) { if ('noAdult' in b) catalogNow = true; scheduleRebuild(100); }
   hub.toAll('settings', publicSettings());
-  return adminSettingsView();
+  // (The relay's settings, or its address: sent to it now, and whether it took them shown on the page.)
+  const relayPush = relayPushSoon || (b.relay && ('url' in b.relay || b.relay.newSecret)) ? await relaySettingsPush().catch(() => null) : null;
+  return relayPush ? { ...adminSettingsView(), _relayPush: relayPush } : adminSettingsView();
 });
 route('POST', '/api/admin/accounts/check', async (req, res, p, q, ctx) => {
   requireAdmin(ctx);
@@ -2947,6 +2955,42 @@ function accountAlerts() {
 // (Each list's account a few times a day; a new list's within a few minutes.)
 const checkAccounts = () => { for (const l of lists.all()) if (l.enabled && (lists.xtAccountOf(l) || l.type === 'stalker') && (!l.account || !l.account.checkedAt || Date.now() - l.account.checkedAt > 20 * 3600e3) && !(l.account && l.account.errorAt && Date.now() - l.account.errorAt < 3600e3)) lists.accountStatus(l.id, 0).catch(() => {}); };
 setInterval(checkAccounts, 5 * 60e3).unref();
+// How the relay handles films and episodes (Admin → Stream relay → Films and episodes): sent to it (relay 8 and later)
+// when saved, when it turns out to have others (relayFinished below), and every 10 minutes; it keeps them on its disk.
+let relayPushed = { tag: '', at: 0, res: null };
+async function relaySettingsPush() {
+  const r = relayOf.conf();
+  if (!r) return null;
+  const w = relayWire(r);
+  const res = await pushRelaySettings(r.url, r.secret, w, fetch);
+  relayPushed = { tag: res.ok ? w.tag : '', at: Date.now(), res };
+  if (!res.ok && !res.old) log(`Stream relay: its settings couldn’t be sent (${res.error || 'it didn’t take them'})`);
+  return res;
+}
+setTimeout(() => { if (relayOf.conf()) relaySettingsPush().catch(() => {}); }, 20e3).unref();
+setInterval(() => { if (relayOf.conf()) relaySettingsPush().catch(() => {}); }, 10 * 60e3).unref();
+// What's on the relay's disk now, and whether it has the admin's settings (for the page; quicker than the full test).
+route('GET', '/api/admin/relay/status', async (req, res, p, q, ctx) => {
+  requireAdmin(ctx);
+  const r = relayOf.conf();
+  if (!r) return { ok: false, error: 'Save the relay’s address first.' };
+  const out = await testRelay(r.url, r.secret, fetch);
+  const mine = bundledRelay();
+  if (out.ok && mine) out.latest = mine.version;
+  // (Not the admin's settings — a relay just set up, or started without its folder: sent now.)
+  if (out.ok && Number(out.version) >= 8) {
+    out.settingsOk = out.cfg === relayWire(r).tag;
+    if (!out.settingsOk) { const pr = await relaySettingsPush().catch(() => null); if (pr && pr.ok) { out.settingsOk = true; if (pr.disk) out.disk = pr.disk; } }
+  }
+  return out;
+});
+// Clears the relay's disk: every film nobody is watching right now.
+route('POST', '/api/admin/relay/clear', async (req, res, p, q, ctx) => {
+  requireAdmin(ctx);
+  const r = settings().relay || {};
+  if (!r.url || !r.secret) return { ok: false, error: 'Save the relay’s address first.' };
+  return clearRelay(r.url, r.secret, fetch);
+});
 // The stream relay: its secret (to copy onto the relay machine) and a test that it's there with the same secret.
 route('GET', '/api/admin/relay/secret', (req, res, p, q, ctx) => { requireAdmin(ctx); return { secret: (settings().relay || {}).secret || '' }; });
 route('POST', '/api/admin/relay/test', async (req, res, p, q, ctx) => {
@@ -2954,7 +2998,10 @@ route('POST', '/api/admin/relay/test', async (req, res, p, q, ctx) => {
   const r = settings().relay || {};
   if (!r.url || !r.secret) return { ok: false, error: 'Save the relay’s address first.' };
   const out = await testRelay(r.url, r.secret, fetch);
-  // Is the relay running the relay.js that comes with this server? (Older ones can't fetch films whole.)
+  // Relay 8 and later: has the admin's settings for films and episodes (sent now if not), and what's on its disk.
+  if (out.ok && Number(out.version) >= 8) {
+    if (out.cfg !== relayWire(r).tag) { const pr = await relaySettingsPush().catch(() => null); out.settingsOk = !!(pr && pr.ok); if (pr && pr.disk) out.disk = pr.disk; } else out.settingsOk = true;
+  }
   const mine = bundledRelay();
   if (out.ok && mine) { out.latest = mine.version; out.outdated = String(out.version) !== mine.version; }
   // The address providers see when the relay connects itself (its own, or its VPN's: docs/stream-relay.md).
@@ -2995,7 +3042,7 @@ route('POST', '/api/admin/proxy/test', async (req, res, p, q, ctx) => {
 /** Settings as the admin page sees them (secrets masked). */
 function adminSettingsView() {
   const s = settings();
-  return { ...s, _hwCheck: media.hwCheck, tmdbKey: s.tmdbKey ? '••••' + s.tmdbKey.slice(-4) : '', proxies: (s.proxies || []).map((x) => ({ ...x, url: x.url.replace(/:([^:@/]+)@/, ':••••@') })), relay: { url: (s.relay || {}).url || '', all: (s.relay || {}).all !== false, hasSecret: !!(s.relay || {}).secret, proxy: (s.relay || {}).proxy || '' } };
+  return { ...s, _hwCheck: media.hwCheck, tmdbKey: s.tmdbKey ? '••••' + s.tmdbKey.slice(-4) : '', proxies: (s.proxies || []).map((x) => ({ ...x, url: x.url.replace(/:([^:@/]+)@/, ':••••@') })), relay: { url: (s.relay || {}).url || '', all: (s.relay || {}).all !== false, hasSecret: !!(s.relay || {}).secret, proxy: (s.relay || {}).proxy || '', cfg: relayCfg(s.relay || {}) } };
 }
 route('POST', '/api/admin/password', async (req, res, p, q, ctx) => {
   requireAdmin(ctx);

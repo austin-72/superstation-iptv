@@ -3,6 +3,26 @@
 What was changed and fixed, in more detail than the README (which says what the app does). Newer first; versions
 from 2.7 on are named. The release notes on GitHub list each version.
 
+## 2.8.14
+
+- **How the stream relay handles films and episodes is set in the app** (Admin → Network & proxies → **Films and
+  episodes on the relay**), instead of being fixed in the relay or set on its machine:
+  - **Keep them on the relay's disk while they're watched** (as before), or **just pass them on** — nothing on its disk,
+    like live channels. Films and episodes can be chosen separately.
+  - **Fetch ahead:** all of it as fast as the provider sends (as before), or only 5, 10, 20, 30 or 60 minutes ahead —
+    less disk and fewer bytes from the provider; it carries on once a quarter of that has been watched.
+  - **Keep what's been watched:** the last minute, 10 minutes (as before) or 30, or all of it (going back is instant).
+  - **Keep a film after it's watched:** not at all, 1 or 6 hours (as before), a day, 3 days, a week or 30 days — watching
+    it again or carrying on later then plays from the relay without asking the provider. Whole films kept are still
+    there after the relay restarts (before, a restart cleared its disk). The longest-unwatched go first when it fills.
+  - **When nobody's watching any more:** stop downloading after 30 seconds, 2 minutes (as before) or 10, or finish it.
+  - **Disk:** the most it may hold, and how much to always leave free (5 GB, as before).
+  - **Speed limit per film**, for providers that block accounts that download too fast.
+  - What's on its disk now (films, space used, space free), and **Clear the relay's disk**.
+  The server sends the settings to the relay, signed with its secret, when they're saved, when the relay turns out not
+  to have them (a new or restarted relay) and every 10 minutes; the relay keeps them in its cache folder. Needs relay
+  version 8 — the page offers **Update the relay** when it's older.
+
 ## 2.8.13
 
 - **A film that doesn't look like the right one is caught sooner:** under 80% of TMDB's running time, or over 145%

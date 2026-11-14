@@ -780,3 +780,7 @@ dialog.dlg[open]::backdrop { animation: artFade .2s ease-out; }
 .bc-ul { list-style: none; margin: .4rem 0 0; padding: 0; display: grid; gap: .5rem; }
 .bc-ul li { display: flex; align-items: center; gap: .8rem; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 10px; }
 .bc-ul li > div { flex: 1; min-width: 0; }
+/* Admin → Network & proxies → Films and episodes on the relay (admin.js relayCfgHtml). */
+.rc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .2rem 1rem; }
+.rc-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.2rem; margin: .3rem 0 .6rem; }
+.rc-status { margin: .2rem 0 .6rem; }

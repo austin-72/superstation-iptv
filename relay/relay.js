@@ -12,7 +12,7 @@
 //   PROXY_USER, PROXY_PASS   required with PROXY_PORT: the proxy's sign-in.
 //   RELAY_ALLOW_PRIVATE=1    allow addresses on this machine's own network (off: only public internet addresses).
 //   RELAY_CACHE_DIR     where whole films and episodes are kept while they're watched (default: the system's temp folder).
-//   RELAY_CACHE_GB      the most they may take up (default: the free disk space minus 5 GB).
+//   RELAY_CACHE_GB      the most they may take up (default: the free disk space minus 5 GB) — until the admin sets it in the app.
 //
 // How it's used: the server signs each stream address with the secret (lib/streamrelay.js). The relay checks the
 // signature and the expiry, fetches the address with the headers the provider needs, and passes the answer on with
@@ -23,6 +23,13 @@
 // machine's disk, and played from there: seeking is instant, and once the file is here the provider connection is
 // free for someone else (the server asks /downloads which ones are finished). Seeking ahead of the download makes the
 // relay jump there first. The server can also send a newer relay.js (Admin → Stream relay → Update the relay).
+//
+// How films and episodes are handled is set in the app (Admin → Network & proxies → Stream relay → Films and
+// episodes): the server sends those settings here (/settings, signed with the secret) and this relay keeps them in
+// relay-settings.json in its cache folder, so a restart doesn't lose them. Just pass them on with nothing on disk, or
+// keep them on disk — how far ahead to fetch, how much of what's been watched to keep, how long to keep a film after
+// it was watched (finished ones survive a restart), when to stop downloading once nobody's watching, how much disk to
+// use and leave free, and a speed limit per film. The environment variables below are only what it starts with.
 'use strict';
 const http = require('http');
 const https = require('https');
@@ -35,7 +42,7 @@ const os = require('os');
 const pathMod = require('path');
 const vm = require('vm');
 
-const VERSION = '7';
+const VERSION = '8';
 const SECRET = process.env.RELAY_SECRET || '';
 const PORT = Number(process.env.PORT) || 8090;
 const PROXY_PORT = Number(process.env.PROXY_PORT) || 0;
@@ -318,6 +325,54 @@ const MIN_RUN = Number(process.env.RELAY_MIN_RUN_MS) || 20000; // a download kee
 const SWAP = Number(process.env.RELAY_SWAP_S) || 240;    // …and gives it up early to a viewer this much further behind
 const GUESS_LEN = 6600;                // a film's length when the server doesn't know it (1 h 50)
 const SETTLED = Number(process.env.RELAY_STRAIN_AFTER_MS) || 20000; // (waiting just after starting or seeking isn't struggling)
+// ---- what the admin chose (Admin → Stream relay → Films and episodes): sent by the server, kept on this disk
+const SETTINGS_FILE = pathMod.join(CACHE_DIR, 'relay-settings.json');
+const DEFAULTS = {
+  mode: 'disk',                                   // 'disk': fetched onto this disk and played from it; 'pass': just passed on
+  ahead: 0,                                       // fetch at most this many seconds ahead of the viewer (0: all of it)
+  back: BACK,                                     // keep this much of what's been watched, in seconds (-1: all of it)
+  keep: KEEP_FOR,                                 // keep a film this long (ms) after it was last watched
+  idle: IDLE_STOP,                                // stop downloading this long (ms) after nobody's watching (-1: finish it)
+  cacheGB: CACHE_LIMIT / 1e9,                     // the most the films may take up (0: the free space)
+  freeGB: KEEP_FREE / 1e9,                        // always leave this much of the disk free
+  speed: 0,                                       // at most this many Mbit/s per film (0: as fast as the provider sends)
+};
+let CFG = { ...DEFAULTS }, cfgTag = '';
+/** The admin's settings, made safe (anything missing or odd: what it starts with). */
+function cleanSettings(o) {
+  const n = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
+  o = o && typeof o === 'object' ? o : {};
+  return {
+    mode: o.mode === 'pass' ? 'pass' : 'disk',
+    ahead: n(o.ahead, 0, 86400, DEFAULTS.ahead),
+    back: Number(o.back) < 0 ? -1 : n(o.back, 0, 86400, DEFAULTS.back),
+    keep: n(o.keep, 0, 90 * 86400e3, DEFAULTS.keep),
+    idle: Number(o.idle) < 0 ? -1 : n(o.idle, 10e3, 86400e3, DEFAULTS.idle),
+    cacheGB: n(o.cacheGB, 0, 1e6, DEFAULTS.cacheGB),
+    freeGB: n(o.freeGB, 0, 1e6, DEFAULTS.freeGB),
+    speed: n(o.speed, 0, 100000, DEFAULTS.speed),
+  };
+}
+function loadSettings() {
+  try { const j = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); CFG = cleanSettings(j.cfg); cfgTag = String(j.tag || ''); } catch {}
+}
+function saveSettings() {
+  try { fs.mkdirSync(CACHE_DIR, { recursive: true }); fs.writeFileSync(SETTINGS_FILE + '.tmp', JSON.stringify({ cfg: CFG, tag: cfgTag }), { mode: 0o600 }); fs.renameSync(SETTINGS_FILE + '.tmp', SETTINGS_FILE); } catch (e) { log('couldn’t save the settings: ' + e.message); }
+}
+/** New settings from the server: used at once (a film on disk that just passing on no longer wants goes when nobody's on it). */
+function applySettings(o, tag) {
+  const before = CFG;
+  CFG = cleanSettings(o);
+  cfgTag = String(tag || '').slice(0, 64);
+  saveSettings();
+  if (CFG.mode === 'pass' && before.mode !== 'pass') for (const w of [...wholes.values()]) if (!w.readers.size) w.remove();
+  if (JSON.stringify(before) !== JSON.stringify(CFG)) log(`settings: ${CFG.mode === 'pass' ? 'just passing films on' : `films on disk, ${CFG.ahead ? Math.round(CFG.ahead / 60) + ' min ahead' : 'all of it ahead'}, ${CFG.back < 0 ? 'all' : Math.round(CFG.back / 60) + ' min'} of what’s watched kept, kept ${Math.round(CFG.keep / 3600e3 * 10) / 10} h after, ${CFG.idle < 0 ? 'finished even when nobody’s watching' : 'stopped ' + Math.round(CFG.idle / 1000) + ' s after nobody’s watching'}${CFG.cacheGB ? `, at most ${CFG.cacheGB} GB` : ''}, ${CFG.freeGB} GB left free${CFG.speed ? `, at most ${CFG.speed} Mbit/s a film` : ''}`}`);
+  kick();
+}
+/** How much ready ahead counts as "enough" when films share connections: 10 minutes, or less when fetching less ahead. */
+const aim = () => (CFG.ahead > 0 ? Math.min(CFG.ahead, AHEAD) : AHEAD);
+/** How long a film nobody's watching stays (never less than the time a viewer's player takes to come back). */
+const keepFor = () => Math.max(CFG.keep, (CFG.idle > 0 ? CFG.idle : IDLE_STOP) + 60e3);
 const wholes = new Map();              // key → Whole
 const budgets = new Map();             // provider account → { n, at }: provider connections the relay may use for its films
 const strain = [];                     // times it couldn't keep up (for the server: Admin → Statistics)
@@ -393,9 +448,9 @@ class Whole {
    * the last piece stay — players read the film's index there). Nothing goes while nobody is reading.
    */
   trim() {
-    if (!this.have || !this.readers.size || this.size <= 3 * BLOCK) return;
+    if (!this.have || !this.readers.size || this.size <= 3 * BLOCK || CFG.back < 0) return;
     const behind = Math.min(...[...this.readers].map((x) => x.pos));
-    const cut = behind - BACK * this.bps();
+    const cut = behind - CFG.back * this.bps();
     if (cut <= BLOCK) return;
     this.floor = Math.max(this.floor, Math.floor(cut / CHUNK) * CHUNK);
     const last = Math.floor((this.size - 1) / BLOCK);
@@ -432,9 +487,15 @@ class Whole {
   wants() {
     if (this.failed || this.bypass) return false;
     if (this.grantWait) return this.asking > 0;
-    if (!this.size || !this.readers.size) return false;
+    if (!this.size) return false;
+    // (Nobody watching: only to finish it, when the admin chose that.)
+    if (!this.readers.size) return CFG.idle < 0 && !this.done && CFG.mode !== 'pass';
+    // (Fetching only so far ahead: again once a quarter of that has been watched.)
+    if (this.capped(0.75)) return false;
     return !this.done || this.ahead() !== Infinity;
   }
+  /** Has as much ready as the admin wants fetched ahead (times `part` of it)? */
+  capped(part) { return CFG.ahead > 0 && this.readers.size > 0 && this.ahead() >= CFG.ahead * part; }
   wake() { for (const w of this.waiters) w(); this.waiters.clear(); }
   wait(ms) { return new Promise((ok) => { const t = setTimeout(done, ms); function done() { clearTimeout(t); ok(); } this.waiters.add(done); }); }
   bytesHere() { return Math.min(this.haveCount * CHUNK, this.size); }
@@ -507,6 +568,15 @@ class Whole {
         // Ran into a part that's already here (or the end): this run is done.
         const next = r.written / CHUNK;
         if (r.last || r.written >= this.size || (this.ranges && r.written % CHUNK === 0 && this.have[next])) { this.endRun(r); return; }
+        // (Fetching only so far ahead, when the admin chose that: the download stops as soon as it's that far — again
+        // once a quarter of it has been watched. Looked at once an MB.)
+        if (CFG.ahead > 0 && this.readers.size && r.written - r.from >= 2 * CHUNK && Math.floor(r.written / CHUNK) !== Math.floor(pos / CHUNK) && this.capped(1)) { this.stopRun(); return; }
+        // (A speed limit per film, when the admin set one: some providers shut accounts that download too fast.)
+        if (CFG.speed > 0) {
+          r.got = (r.got || 0) + buf.length;
+          const wait = r.t0 + (r.got * 8) / (CFG.speed * 1e6) * 1000 - Date.now();
+          if (wait > 5) { setTimeout(() => { if (!r.stop) up.resume(); }, Math.min(wait, 3000)); return; }
+        }
         if (!r.stop) up.resume();
       }, () => { this.fail(new Error('The relay’s disk is full or failing')); }));
     });
@@ -516,11 +586,15 @@ class Whole {
   }
   /** Lets go of the open pieces (they're opened again when needed): a finished film, or nobody watching. */
   closeFds() { for (const fd of this.fds.values()) { try { fs.closeSync(fd); } catch {} } this.fds.clear(); }
-  /** Nobody reading: after IDLE_STOP the download stops, so the provider connection is free again. */
+  /**
+   * Nobody reading: after a while (the admin's choice, 2 minutes to start with) the download stops, so the provider
+   * connection is free again — or, when the admin chose so, it carries on to the end.
+   */
   armIdle() {
     if (this.readers.size) return;
     clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => { if (!this.readers.size) { if (this.run) this.stopRun(); this.closeFds(); } }, IDLE_STOP);
+    if (CFG.idle < 0) { if (this.done) this.closeFds(); else if (!this.run) this.next(); return; }
+    this.idleTimer = setTimeout(() => { if (!this.readers.size) { if (this.run) this.stopRun(); this.closeFds(); } }, CFG.idle);
   }
   stopRun() { if (this.run) { this.run.stop = true; try { this.run.up.destroy(); } catch {} this.run = null; } this.holdSince = 0; kick(); }
   endRun(r, broken) {
@@ -542,20 +616,29 @@ class Whole {
   }
   complete() {
     if (!this.done) log(`whole ${this.key.slice(0, 8)}: all ${(this.size / 1e9).toFixed(2)} GB here in ${Math.round((Date.now() - this.started) / 1000)} s`);
+    const was = this.done;
     this.done = true;
+    if (!was && this.trimmed === 0 && this.missingFrom(0) < 0) this.remember();
     if (this.run) { this.run.stop = true; try { this.run.up.destroy(); } catch {} this.run = null; }
     this.holdSince = 0;
     if (!this.readers.size) this.closeFds();
     this.wake(); kick();
   }
+  /** All of it is here: noted beside its pieces, so it's still here after a restart (for as long as it's kept). */
+  remember() {
+    try { fs.writeFileSync(this.indexFile(), JSON.stringify({ size: this.size, type: this.type, len: this.len, ids: [...this.ids], acct: this.acct, lastUse: this.lastUse, ranges: this.ranges }), { mode: 0o600 }); this.remembered = true; } catch {}
+  }
+  indexFile() { return pathMod.join(CACHE_DIR, `${this.key}.json`); }
   fail(e) { this.failed = e; if (this.run) { this.run.stop = true; try { this.run.up.destroy(); } catch {} this.run = null; } this.wake(); kick(); }
   /** The next gap to fill: where a viewer is waiting, after the furthest-behind reader, then from the part still kept. */
   next() {
-    if (this.failed || this.run || !this.readers.size || !this.have) return;
+    if (this.failed || this.run || !this.have) return;
+    if (!this.readers.size && !(CFG.idle < 0)) return;
+    if (this.capped(0.75)) return;
     if (!mayStart(this)) return kick();
     if (this.wantAt >= 0 && !this.chunkHave(Math.floor(this.wantAt / CHUNK))) { const at = this.wantAt; this.wantAt = -1; return this.startAt(at); }
     this.wantAt = -1;
-    const behind = Math.min(...[...this.readers].map((x) => x.pos));
+    const behind = this.readers.size ? Math.min(...[...this.readers].map((x) => x.pos)) : this.floor;
     let i = this.missingFrom(behind);
     if (i < 0) i = this.missingFrom(Math.min(this.floor, behind));
     if (i < 0) return this.complete();
@@ -603,6 +686,7 @@ class Whole {
   dropReader(x) {
     if (!this.readers.delete(x)) return;
     this.lastUse = Date.now();
+    if (this.remembered && !this.readers.size) this.remember(); // (watched again: kept from now)
     kick();
     if (this.readers.size) return;
     this.armIdle();
@@ -614,6 +698,7 @@ class Whole {
     this.closeFds();
     const blocks = this.size ? Math.ceil(this.size / BLOCK) : 0;
     for (let b = 0; b < blocks; b++) { try { fs.unlinkSync(this.blockFile(b)); } catch {} }
+    try { fs.unlinkSync(this.indexFile()); } catch {}
     this.have = null;
     if (wholes.get(this.key) === this) wholes.delete(this.key);
     kick();
@@ -676,9 +761,9 @@ function schedule() {
     const waiting = st.filter((s) => s.wants && !s.w.run && !s.w.starting && (s.w.grantWait || !(s.w.retryAt > now))).sort((x, y) => x.ahead - y.ahead);
     for (const c of waiting) {
       if (running.length < n) { resume(c.w); running.push(c); continue; }
-      if (c.ahead >= AHEAD) break;
+      if (c.ahead >= aim()) break;
       const v = running.filter((s) => s.w.run && !s.w.starting && (!s.w.readers.size || now - (s.w.holdSince || s.w.run.t0 || 0) >= MIN_RUN)).sort((x, y) => y.ahead - x.ahead)[0];
-      if (!v || !(!v.w.readers.size || v.ahead >= AHEAD + 60 || v.ahead - c.ahead >= SWAP)) break;
+      if (!v || !(!v.w.readers.size || v.ahead >= aim() + 60 || v.ahead - c.ahead >= SWAP)) break;
       v.w.parked = true; v.w.stopRun();
       running = running.filter((s) => s !== v);
       resume(c.w); running.push(c);
@@ -688,7 +773,15 @@ function schedule() {
     noteStrain(a, st, n, now);
   }
 }
-setInterval(() => { schedule(); for (const w of wholes.values()) try { w.trim(); } catch {} }, Number(process.env.RELAY_TICK_MS) || 1000).unref();
+setInterval(() => {
+  schedule();
+  for (const w of wholes.values()) {
+    try { w.trim(); } catch {}
+    // (Fetching only so far ahead: a download that's got that far stops — again once a quarter of it has been watched.)
+    if (w.run && !w.starting && w.capped(1) && Date.now() - (w.run.t0 || 0) > 3000) w.stopRun();
+    else if (!w.run && !w.starting && w.readers.size && !w.done && CFG.ahead > 0 && !w.capped(0.75) && mayStart(w) && !(w.retryAt > Date.now())) w.next();
+  }
+}, Number(process.env.RELAY_TICK_MS) || 1000).unref();
 
 /**
  * Struggling to keep up: the films being watched on an account need more than the provider is sending (over the last
@@ -719,7 +812,7 @@ function noteStrain(a, st, n, now) {
     }
     if (settled && s.ahead !== Infinity) need += s.w.bps();
   }
-  const short = need > 0 && rate < need * 0.95 && least < AHEAD / 2;
+  const short = need > 0 && rate < need * 0.95 && least < aim() / 2;
   const runs = st.filter((s) => s.w.run).length;
   if (!stalled && !short) return;
   const prev = lastStrain.get(a);
@@ -731,6 +824,11 @@ function noteStrain(a, st, n, now) {
   log(`can't keep up${a ? ' (account ' + a.slice(0, 6) + ')' : ''}: ${viewers} watching, ${runs}${n ? ' of ' + n : ''} connections, ${stalled} waiting to start${least < Infinity ? ', least ready ' + Math.round(least) + ' s' : ''}${need ? `, needs ${(need * 8 / 1e6).toFixed(1)} Mbit/s, getting ${rate === Infinity ? '?' : (rate * 8 / 1e6).toFixed(1)}` : ''}`);
 }
 
+/** What's on this disk for the admin's page: films kept, the space they take, what's free, the limit. */
+function diskStatus() {
+  const films = [...wholes.values()].filter((w) => w.size && !w.bypass);
+  return { films: films.length, whole: films.filter((w) => w.done).length, used: films.reduce((s, w) => s + w.bytesHere(), 0), free: diskFree(), limit: CFG.cacheGB * 1e9, keepFree: CFG.freeGB * 1e9 };
+}
 function diskFree() { try { const s = fs.statfsSync(fs.existsSync(CACHE_DIR) ? CACHE_DIR : os.tmpdir()); return s.bavail * s.bsize; } catch { return 0; } }
 /**
  * Room for a film of `size` bytes: the free disk, less what the films still downloading will take, less KEEP_FREE (and
@@ -740,8 +838,8 @@ function makeRoom(size, self) {
   const others = () => [...wholes.values()].filter((w) => w !== self && w.size);
   const room = () => {
     const o = others();
-    let r = diskFree() - KEEP_FREE - o.reduce((s, w) => s + w.toFetch(), 0);
-    if (CACHE_LIMIT) r = Math.min(r, CACHE_LIMIT - o.reduce((s, w) => s + w.bytesHere() + w.toFetch(), 0));
+    let r = diskFree() - CFG.freeGB * 1e9 - o.reduce((s, w) => s + w.toFetch(), 0);
+    if (CFG.cacheGB > 0) r = Math.min(r, CFG.cacheGB * 1e9 - o.reduce((s, w) => s + w.bytesHere() + w.toFetch(), 0));
     return r;
   };
   if (room() >= size) return true;
@@ -750,27 +848,66 @@ function makeRoom(size, self) {
 }
 /** The server says which films are still being watched; downloads for any other film stop when nobody's reading. */
 function stopUnwatched(activeIds) {
+  if (CFG.idle < 0) return; // (the admin chose to finish them)
   for (const w of wholes.values()) {
     if (!w.run || w.readers.size || !w.ids.size) continue;
     if (![...w.ids].some((i) => activeIds.has(i))) w.stopRun();
   }
 }
-// A film is kept for at most twice its length (and never more than KEEP_FOR unused) once nobody is watching it.
+// A film nobody is watching is kept for as long as the admin chose (6 hours to start with) after it was last watched —
+// or until its room is needed (makeRoom). (One still being finished for later stays until it's done.) Before the
+// server has sent any settings (an older server), as it always was: also gone twice its length after it started.
 setInterval(() => {
   const now = Date.now();
   for (const w of [...wholes.values()]) {
     if (w.readers.size || w.grantWait || w.starting || w.asking > 0) continue;
-    const old = now - w.started > 2 * (w.len || GUESS_LEN) * 1000;
-    if (old || now - w.lastUse > KEEP_FOR || (w.bypass && now - w.started > 10 * 60e3)) w.remove();
+    if (w.run && CFG.idle < 0) continue;
+    const old = !cfgTag && now - w.started > 2 * (w.len || GUESS_LEN) * 1000;
+    if (old || now - w.lastUse > keepFor() || (w.bypass && now - w.started > 10 * 60e3)) w.remove();
   }
 }, Number(process.env.RELAY_SWEEP_MS) || 60e3).unref();
+/** The films kept from before a restart (whole ones, still within the time they're kept); every other leftover goes. */
+function restoreFilms() {
+  let files = [];
+  try { files = fs.readdirSync(CACHE_DIR); } catch { return; }
+  const keepKeys = new Set();
+  if (CFG.mode !== 'pass') {
+    for (const f of files) {
+      const m = /^([0-9a-f]{32})\.json$/.exec(f);
+      if (!m) continue;
+      try {
+        const j = JSON.parse(fs.readFileSync(pathMod.join(CACHE_DIR, f), 'utf8'));
+        if (!(j.size > 0) || Date.now() - (j.lastUse || 0) > keepFor()) continue;
+        const w = new Whole(m[1], { u: '', h: {}, i: '' });
+        w.size = j.size; w.type = j.type || 'application/octet-stream'; w.len = j.len || 0; w.ranges = j.ranges !== false; w.acct = j.acct || '';
+        for (const i of j.ids || []) w.ids.add(String(i));
+        w.chunks = Math.ceil(w.size / CHUNK);
+        let ok = true;
+        for (let b = 0; b < Math.ceil(w.size / BLOCK); b++) { const want = Math.min(BLOCK, w.size - b * BLOCK); let st; try { st = fs.statSync(w.blockFile(b)); } catch { ok = false; break; } if (st.size < want) { ok = false; break; } }
+        if (!ok) continue;
+        w.have = new Uint8Array(w.chunks).fill(1); w.haveCount = w.chunks; w.done = true; w.remembered = true; w.restored = true;
+        w.lastUse = j.lastUse || Date.now(); w.started = w.lastUse;
+        w.ready = Promise.resolve(true);
+        wholes.set(w.key, w);
+        keepKeys.add(w.key);
+      } catch {}
+    }
+  }
+  for (const f of files) {
+    const m = /^([0-9a-f]{32})(\.\d+)?\.(bin|json)(\.\w+)?$/.exec(f);
+    if (m && !keepKeys.has(m[1])) { try { fs.unlinkSync(pathMod.join(CACHE_DIR, f)); } catch {} }
+  }
+  if (keepKeys.size) log(`${keepKeys.size} film${keepKeys.size === 1 ? '' : 's'} kept from before the restart`);
+}
 
 const drained = (res) => new Promise((ok) => { const done = () => { res.off('drain', done); res.off('close', done); ok(); }; res.on('drain', done); res.on('close', done); });
 
 /** Plays a film from the copy on disk, filling it from the provider as needed. Falls back to plain relaying. */
 async function whole(req, res, o) {
+  if (CFG.mode === 'pass') return relay(req, res, o); // (the admin chose: just pass films on)
   const key = crypto.createHash('sha256').update(o.u).digest('hex').slice(0, 32);
   let w = wholes.get(key);
+  if (w && w.restored) { w.o = o; w.restored = false; } // (kept from before a restart: this request carries its address)
   if (w && (w.failed || (w.bypass && Date.now() - w.started > 10 * 60e3))) { w.remove(); w = null; }
   const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || '').trim());
   let a = m && m[1] !== '' ? Number(m[1]) : 0;
@@ -828,7 +965,7 @@ async function whole(req, res, o) {
       await w.wait(15000);
     }
     res.end();
-  } catch { res.destroy(); }
+  } catch (e) { if (process.env.RELAY_DEBUG) log('read: ' + ((e && e.stack) || e)); res.destroy(); }
   finally { w.dropReader(reader); }
 }
 
@@ -876,7 +1013,7 @@ const server = http.createServer(async (req, res) => {
     const ok = signedQuery(req, 'check');
     const films = [...wholes.values()].filter((w) => w.size && !w.bypass);
     res.writeHead(ok ? 200 : 403, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(ok ? { ok: true, version: VERSION, streams: active.size + films.filter((w) => w.run).length, films: films.length, update: true } : { ok: false, error: 'The secret doesn’t match' }));
+    return res.end(JSON.stringify(ok ? { ok: true, version: VERSION, streams: active.size + films.filter((w) => w.run).length, films: films.length, update: true, settings: true, cfg: cfgTag, disk: diskStatus() } : { ok: false, error: 'The secret doesn’t match' }));
   }
   // The server asks which films are fully here (their provider connection is free again), says how many provider
   // connections each account's films may use, and collects the times the relay couldn't keep up.
@@ -903,7 +1040,27 @@ const server = http.createServer(async (req, res) => {
       if (!w.run && w.wants()) x.waiting++;
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ ok: true, version: VERSION, films: [...wholes.values()].filter((w) => w.size && !w.bypass).map((w) => w.status()), accounts: accts, strain: strain.filter((e) => e.seq > since), seq: strainSeq }));
+    return res.end(JSON.stringify({ ok: true, version: VERSION, cfg: cfgTag, films: [...wholes.values()].filter((w) => w.size && !w.bypass).map((w) => w.status()), accounts: accts, strain: strain.filter((e) => e.seq > since), seq: strainSeq }));
+  }
+  // The admin's settings for films and episodes (Admin → Stream relay): used at once, and kept on this disk.
+  if (path === '/settings') {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const c = q.get('c') || '';
+    if (!c || c.length > 4000 || !signedQuery(req, 'settings:' + c)) { res.writeHead(403); return res.end(); }
+    let o;
+    try { o = JSON.parse(Buffer.from(c, 'base64url').toString('utf8')); } catch { res.writeHead(400); return res.end(); }
+    applySettings(o.cfg, o.tag);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ ok: true, version: VERSION, cfg: cfgTag, disk: diskStatus() }));
+  }
+  // Clear the disk: every film nobody is watching right now goes.
+  if (path === '/clear') {
+    if (!signedQuery(req, 'clear')) { res.writeHead(403); return res.end(); }
+    let n = 0, bytes = 0;
+    for (const w of [...wholes.values()]) if (!w.readers.size) { n++; bytes += w.bytesHere(); w.remove(); }
+    log(`cleared: ${n} film${n === 1 ? '' : 's'}, ${(bytes / 1e9).toFixed(1)} GB`);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ ok: true, removed: n, bytes, disk: diskStatus() }));
   }
   if (path === '/update' && req.method === 'POST') { try { return await update(req, res); } catch { if (!res.headersSent) { res.writeHead(500); res.end(); } return; } }
   if (path === '/' || path === '/health') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('Stream relay ' + VERSION + '\n'); }
@@ -955,9 +1112,10 @@ if (require.main === module) {
   if (PROXY_PORT && (!PROXY_USER || !PROXY_PASS)) { console.error('PROXY_PORT needs PROXY_USER and PROXY_PASS.'); process.exit(1); }
   // One bad connection must not stop everyone's streams: note it and carry on.
   process.on('uncaughtException', (e) => log('error: ' + ((e && e.stack) || e)));
-  // Films left over from before a restart: their bookkeeping is gone, so start afresh.
-  try { for (const f of fs.readdirSync(CACHE_DIR)) if (/^[0-9a-f]{32}(\.\d+)?\.bin(\.\w+)?$/.test(f)) fs.unlinkSync(pathMod.join(CACHE_DIR, f)); } catch {}
+  // The admin's settings, as last sent; then the whole films kept from before a restart (the rest goes).
+  loadSettings();
+  restoreFilms();
   server.listen(PORT, () => log(`Stream relay ${VERSION} on port ${PORT} (whole films kept in ${CACHE_DIR}, ${(diskFree() / 1e9).toFixed(0)} GB free)`));
   if (PROXY_PORT) startProxy();
 }
-module.exports = { signPath, seal, open, rewrite, isPrivate, VERSION, Whole, schedule, budgets };
+module.exports = { signPath, seal, open, rewrite, isPrivate, VERSION, Whole, schedule, budgets, wholes, applySettings, cleanSettings, loadSettings, restoreFilms, settings: () => CFG, server, diskStatus, CACHE_DIR };

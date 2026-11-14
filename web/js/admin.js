@@ -941,7 +941,45 @@ V.tmdbFetchPanel = function (box) {
 };
 
 V.adminTabs.network = function (body, A) {
-  var st = A.settings;
+
+  // How the relay handles films and episodes (sent to it by the server; relay 8 and later keeps them on its disk).
+  var opt = function (list, v) { return list.map(function (o) { return '<option value="' + o[0] + '"' + (String(v) === String(o[0]) ? ' selected' : '') + '>' + o[1] + '</option>'; }).join(''); };
+  var relayCfgHtml = function (c) {
+    var disk = c.mode !== 'pass';
+    return '<section class="card-sec rc-sec"><h2>Films and episodes on the relay</h2>' +
+      '<p class="dim">Live channels are always just passed on. Films and episodes can be too, or kept on the relay’s disk while they’re watched: then seeking is instant, a film is fetched from the provider once (at full speed) and its provider connection is free again once it’s all there — and films of one account share its connections.</p>' +
+      '<div class="rc-status dim small" aria-live="polite"></div>' +
+      '<label class="field"><span>Films and episodes</span><select class="input" data-rc="mode">' + opt([['disk', 'Keep them on the relay’s disk while they’re watched'], ['pass', 'Just pass them on — nothing on the relay’s disk']], disk ? 'disk' : 'pass') + '</select></label>' +
+      '<div class="rc-disk"' + (disk ? '' : ' hidden') + '>' +
+        '<div class="rc-row"><label class="check"><input type="checkbox" data-rc="films"' + (c.films !== false ? ' checked' : '') + '><span>Films</span></label><label class="check"><input type="checkbox" data-rc="episodes"' + (c.episodes !== false ? ' checked' : '') + '><span>Episodes</span></label><span class="dim small">on the disk (the others are just passed on)</span></div>' +
+        '<div class="rc-grid">' +
+          '<label class="field"><span>Fetch ahead</span><select class="input" data-rc="ahead">' + opt([[0, 'All of it, as fast as the provider sends'], [5, '5 minutes ahead'], [10, '10 minutes ahead'], [20, '20 minutes ahead'], [30, '30 minutes ahead'], [60, '1 hour ahead']], c.ahead || 0) + '</select><small class="dim">Less ahead: less disk and fewer bytes from the provider, but a dip in the provider’s speed shows sooner.</small></label>' +
+          '<label class="field"><span>Keep what’s been watched</span><select class="input" data-rc="back">' + opt([[1, 'The last minute'], [10, 'The last 10 minutes'], [30, 'The last 30 minutes'], [-1, 'All of it — going back is instant']], c.back == null ? 10 : c.back) + '</select></label>' +
+          '<label class="field"><span>Keep a film after it’s watched</span><select class="input" data-rc="keepH">' + opt([[0, 'Not at all — gone once nobody’s watching'], [1, '1 hour'], [6, '6 hours'], [24, '1 day'], [72, '3 days'], [168, '1 week'], [720, '30 days']], c.keepH == null ? 6 : c.keepH) + '</select><small class="dim">Watching it again, or carrying on later, then plays from the relay without asking the provider. Whole films kept are still there after the relay restarts. When the disk fills up, the longest-unwatched go first.</small></label>' +
+          '<label class="field"><span>When nobody’s watching any more</span><select class="input" data-rc="idle">' + opt([[0.5, 'Stop downloading after 30 seconds'], [2, 'Stop downloading after 2 minutes'], [10, 'Stop downloading after 10 minutes'], [-1, 'Finish downloading it']], c.idle == null ? 2 : c.idle) + '</select><small class="dim">Finishing it uses a provider connection until it’s all there.</small></label>' +
+          '<label class="field"><span>The most the disk may hold <small class="dim">(GB)</small></span><input class="input" type="number" min="0" step="1" inputmode="numeric" data-rc="cacheGB" value="' + (c.cacheGB || '') + '" placeholder="All the free space"></label>' +
+          '<label class="field"><span>Always leave free <small class="dim">(GB)</small></span><input class="input" type="number" min="0" step="1" inputmode="numeric" data-rc="freeGB" value="' + (c.freeGB == null ? 5 : c.freeGB) + '"></label>' +
+          '<label class="field"><span>Speed limit per film <small class="dim">(Mbit/s)</small></span><input class="input" type="number" min="0" step="1" inputmode="numeric" data-rc="speed" value="' + (c.speed || '') + '" placeholder="None"><small class="dim">Some providers block accounts that download too fast. Keep it well above the films’ own rate: 25 or more for HD, 60 or more for 4K.</small></label>' +
+        '</div>' +
+      '</div>' +
+      '<div class="btn-row"><button class="btn primary" data-rc-save>Save</button><button class="btn" data-rc-clear>Clear the relay’s disk</button><span class="dim small" data-rc-res></span></div></section>';
+  };
+  var gb = function (b) { return (b / 1e9 >= 10 ? Math.round(b / 1e9) : Math.round(b / 1e8) / 10) + ' GB'; };
+  var relayStatus = function (j) {
+    var el = V.$('.rc-status', body);
+    if (!el) return;
+    if (!j || !j.ok) { el.innerHTML = j && j.error ? '<span class="err">' + V.esc(j.error) + '</span>' : ''; return; }
+    if (Number(j.version) < 8) { el.innerHTML = '<span class="warn">The relay runs version ' + V.esc(String(j.version)) + ': these settings need version 8 or later.</span> <button class="btn sm primary" data-relay-update>Update the relay</button>'; return; }
+    var d = j.disk || {};
+    el.innerHTML = (j.settingsOk === false ? '<span class="warn">The relay doesn’t have these settings yet — press Save.</span> ' : V.icon('check', 'tiny ok') + ' The relay has these settings. ') +
+      (d.films != null ? 'On its disk: ' + (d.films ? V.plural(d.films, 'film') + (d.whole && d.whole < d.films ? ' (' + d.whole + ' whole)' : '') + ', ' + gb(d.used || 0) : 'nothing') + ' · ' + gb(d.free || 0) + ' free' + (d.limit ? ' · at most ' + gb(d.limit) : '') : '');
+  };
+  var relayStatusLoad = function () { if (!V.$('.rc-status', body)) return; V.api('/api/admin/relay/status').then(relayStatus).catch(function () {}); };
+  var rcCollect = function () {
+    var g = function (k) { return V.$('[data-rc="' + k + '"]', body); };
+    var num = function (k) { var v = parseFloat(g(k).value); return isFinite(v) && v > 0 ? v : 0; };
+    return { mode: g('mode').value, films: g('films').checked, episodes: g('episodes').checked, ahead: +g('ahead').value, back: +g('back').value, keepH: +g('keepH').value, idle: +g('idle').value, cacheGB: num('cacheGB'), freeGB: g('freeGB').value === '' ? 5 : Math.max(0, parseFloat(g('freeGB').value) || 0), speed: num('speed') };
+  };  var st = A.settings;
   var proxies = (st.proxies || []).map(function (x) { return Object.assign({}, x); });
   var draw = function () {
     body.innerHTML = '<section class="card-sec"><h2>Proxies</h2><p class="dim">Send the server’s own traffic to providers through a proxy (HTTP or SOCKS5): list downloads, account checks, TV guides, TMDB, and every stream that goes through the server (relays and conversions). Each list can use the default, another proxy, or none (Admin → Lists → edit).</p>' +
@@ -965,7 +1003,8 @@ V.adminTabs.network = function (body, A) {
           (r.hasSecret ? '<p class="small">The relay needs this server’s secret: <button class="btn sm" data-relay-copy>' + V.icon('copy') + ' Copy the secret</button> <button class="btn sm" data-relay-new>Make a new secret</button></p>' : '<p class="dim small">A secret is made when you save the address.</p>') +
           '<div class="btn-row"><button class="btn primary" data-relay-save>Save</button>' + (r.url ? '<button class="btn" data-relay-test>Test</button><button class="btn" data-relay-off>Stop using it</button>' : '') + '<span class="dim small" data-relay-res></span></div>' +
           (r.url && https && /^http:/i.test(r.url) ? '<p class="note warn">' + V.icon('info') + ' <span>This relay is plain http, so browsers opening this app on https can’t use it; their streams go through the server instead.</span></p>' : '') +
-          '<p class="dim small">Everything this server reads from those lists goes through the relay too: conversions, downloads, recordings, other apps and channel checks. Streams a browser can’t play as they are (MKV films with AC-3 sound, for example) are converted in the browser when it can, else by this server — both reading from the relay. Lists, guides and account checks still go from this server: set the relay up as this server’s proxy too (see the guide) to hide your home’s address from those as well.</p></section>';
+          '<p class="dim small">Everything this server reads from those lists goes through the relay too: conversions, downloads, recordings, other apps and channel checks. Streams a browser can’t play as they are (MKV films with AC-3 sound, for example) are converted in the browser when it can, else by this server — both reading from the relay. Lists, guides and account checks still go from this server: set the relay up as this server’s proxy too (see the guide) to hide your home’s address from those as well.</p></section>' +
+          (r.url ? relayCfgHtml(r.cfg || {}) : '');
       })() +
       '<section class="card-sec"><h2>Direct playback from an https address</h2><p class="dim">Browsers won’t play a plain-http stream on a secure (https) page, so streams from http-only providers have to go through the server when people use your https address. Give this server’s plain-http address here (your home network address, e.g. <code>http://192.168.1.20:' + (location.port || 8080) + '</code>, or a public one) and those devices can switch to it and play straight from the provider. They stay signed in.</p>' +
       '<p class="dim small">Note: on plain http, what the app sends isn’t encrypted. A home-network address keeps that inside your home (and then the switch only works at home).</p>' +
@@ -974,11 +1013,17 @@ V.adminTabs.network = function (body, A) {
       '<button class="btn primary" data-save-d>Save</button></section>';
   };
   draw();
+  relayStatusLoad();
   // Redraw without losing what's typed but not saved yet in the other sections (keep: their fields' attributes).
   var redraw = function (keep) {
     var vals = keep.map(function (a) { var el = V.$('[' + a + ']', body); return el ? el.value : null; });
     draw();
     keep.forEach(function (a, i) { var el = V.$('[' + a + ']', body); if (el && vals[i] !== null) el.value = vals[i]; });
+    relayStatusLoad();
+  };
+  body.onchange = function (e) {
+    // (Just passing films on: the disk settings don't apply.)
+    if (e.target.getAttribute('data-rc') === 'mode') { var dk = V.$('.rc-disk', body); if (dk) dk.hidden = e.target.value === 'pass'; }
   };
   var collect = function () { V.$$('.proxies [data-i]', body).forEach(function (li) { var x = proxies[+li.dataset.i]; x.name = V.$('[data-k=name]', li).value; x.url = V.$('[data-k=url]', li).value.trim(); x.video = V.$('[data-k=video]', li).checked; }); };
   body.onclick = function (e) {
@@ -1001,6 +1046,24 @@ V.adminTabs.network = function (body, A) {
         (r.proxies ? '<span class="relay-px">' + (r.ownIp ? '<br>' + V.icon('info', 'tiny') + ' The relay’s own address: ' + V.esc(r.ownIp) : '') + r.proxies.map(function (x) { return '<br>' + (x.ok ? V.icon('check', 'tiny ok') + ' Through ' + V.esc(x.name) + ': works · ' + x.ms + ' ms · providers see ' + V.esc(x.ip || '?') : '<span class="err">Through ' + V.esc(x.name) + ': ' + V.esc(x.error) + '</span>'); }).join('') + '</span>' : '') +
         (r.proxyNote ? '<br><span class="dim">' + V.esc(r.proxyNote) + '</span>' : '') : '<span class="err">' + V.esc(r.error) + '</span>'; }).catch(V.fail); }
     else if (e.target.closest('[data-relay-update]')) { var ru = V.$('[data-relay-res]', body); ru.textContent = 'Updating the relay…'; V.api('/api/admin/relay/update', { method: 'POST' }).then(function (r) { if (!r.ok) { ru.innerHTML = '<span class="err">' + V.esc(r.error) + '</span>'; return; } ru.textContent = 'Updated to version ' + r.to + ' — it’s restarting…'; setTimeout(function () { var t = V.$('[data-relay-test]', body); if (t && body.isConnected) t.click(); }, 6000); }).catch(function (er) { ru.textContent = ''; V.fail(er); }); }
+    else if (e.target.closest('[data-rc-save]')) {
+      var rres = V.$('[data-rc-res]', body);
+      V.adminSave({ relay: { cfg: rcCollect() } }, 'Saved').then(function (r) {
+        st = r;
+        var pr = r._relayPush;
+        if (rres) rres.innerHTML = !pr ? '' : pr.ok ? V.icon('check', 'tiny ok') + ' The relay has them now' : '<span class="' + (pr.old ? 'warn' : 'err') + '">' + V.esc(pr.error || 'The relay didn’t take them') + '</span>';
+        if (pr && pr.disk) relayStatus({ ok: true, version: 8, settingsOk: pr.ok, disk: pr.disk });
+      }).catch(function () {});
+    } else if (e.target.closest('[data-rc-clear]')) V.confirm('Clear the relay’s disk? Every film on it that nobody is watching right now is deleted; they’re fetched from the provider again when watched.', { ok: 'Clear it', danger: true }).then(function (ok) {
+      if (!ok) return;
+      var cres = V.$('[data-rc-res]', body);
+      V.api('/api/admin/relay/clear', { method: 'POST' }).then(function (r) {
+        if (!r.ok) { if (cres) cres.innerHTML = '<span class="err">' + V.esc(r.error) + '</span>'; return; }
+        V.toast(r.removed ? 'Cleared — ' + V.plural(r.removed, 'film') + ', ' + gb(r.bytes || 0) : 'There was nothing to clear');
+        relayStatus({ ok: true, version: 8, settingsOk: true, disk: r.disk });
+        relayStatusLoad();
+      }).catch(V.fail);
+    });
     else if (e.target.closest('[data-save-d]')) V.adminSave({ directAddress: V.$('[data-direct]', body).value.trim(), directSwitch: V.$('[data-dmode]', body).value }).then(function (r) { st = r; S.settings.directAddress = r.directAddress; S.settings.directSwitch = r.directSwitch; redraw(['data-relay-url']); }).catch(function () {});
   };
 };
