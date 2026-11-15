@@ -773,13 +773,14 @@ V.adminTabs.recs = function (body, A) {
     '<p class="dim small">Status: ' + (A.status.tmdb.enabled ? 'on · ' + A.status.tmdb.matched + ' titles have details' + (A.status.tmdb.error ? ' · <span class="err">' + V.esc(A.status.tmdb.error) + '</span>' : '') : 'off') + '</p>' +
     '<div class="tmdb-fetch"></div></section>' +
     (A.status.tmdb.enabled ? V.tmdbOptionsHtml(s) + '<section class="card-sec"><h2>Episode details</h2><p class="dim">Each episode’s own title, plot, picture and first air date from TMDB, for series your lists describe only as “Episode 3” or with no plots and pictures. Shown on each series’ page; the provider’s own titles and plots stay where they’re good.</p><div class="tmdb-eps"></div></section>' +
+      '<section class="card-sec tfx-sec"><h2>Corrected matches</h2><p class="dim">Every film and series is checked against what its provider says about it: its cast, its length (the real one, once someone has watched it), its year and the provider’s own TMDB number. When those clearly say the match is another title of the same name — “Whose Line Is It Anyway?” from 2013 matched to the 1988 one — it’s moved to the entry that fits. A match picked by hand is never changed, and each correction can be undone here.</p><div class="tmdb-fixes"></div></section>' +
       '<section class="card-sec"><h2>Page extras</h2><p class="dim">A title’s logo, cast with photos, facts, release dates and reviews are fetched from TMDB the first time its page is opened, then kept here: later opens are instant, and anything older than a day is updated behind the page. To have no page wait even the first time, fetch them all ahead — one request a title, about 7 a second, and a good deal of disk space (shown as it goes). It can be stopped and carries on later where it left off.</p><div class="tmdb-extras"></div></section>' : '') +
     '<section class="card-sec"><h2>How recommendations work</h2><p class="dim">Each profile’s picks are worked out on the server and saved on disk. They use what the profile watched (more weight for finished and recent things), thumbs up/down, My List and chosen interests; TMDB’s related titles; actors and directors you keep watching; titles several of your favourites point to; and what others in the household watch. Titles that keep being shown without being opened make way for new ones, and rows are re-ranked for variety.</p></section>';
   body.onclick = function (e) {
     if (e.target.closest('[data-save]')) V.adminSave({ tmdbKey: V.$('[data-key]', body).value }).then(function () { V.router.refresh(); });
     if (e.target.closest('[data-test]')) V.api('/api/admin/tmdb/test', { method: 'POST' }).then(function (j) { V.toast(j.ok ? 'TMDB works' : 'TMDB: ' + j.error, { error: !j.ok }); }).catch(V.fail);
   };
-  if (A.status.tmdb.enabled) { V.tmdbFetchPanel(V.$('.tmdb-fetch', body)); V.tmdbEpisodesPanel(V.$('.tmdb-eps', body)); V.tmdbExtrasPanel(V.$('.tmdb-extras', body)); V.tmdbOptionsWire(body); }
+  if (A.status.tmdb.enabled) { V.tmdbFetchPanel(V.$('.tmdb-fetch', body)); V.tmdbEpisodesPanel(V.$('.tmdb-eps', body)); V.tmdbExtrasPanel(V.$('.tmdb-extras', body)); V.tmdbFixesPanel(V.$('.tmdb-fixes', body), s); V.tmdbOptionsWire(body); }
 };
 
 /** Admin → Recommendations → Options: what TMDB fills in, and how. */
@@ -803,6 +804,53 @@ V.tmdbOptionsWire = function (body) {
     else return;
     V.adminSave(patch, t.dataset.opt === 'tmdbTitles' ? 'Saved — the catalogue is being put together again' : 'Saved').catch(function () { if (t.dataset.opt) t.checked = !t.checked; });
   });
+};
+
+/** Admin → Recommendations → Corrected matches: TMDB matches the provider's details said were wrong (lib/tmdbfix.js). */
+V.tmdbFixesPanel = function (box, s) {
+  if (!box) return;
+  var info = null, timer = null, more = false;
+  var WHY = { cast: 'the cast is another one', length: 'the film runs another length', list: 'the provider’s own TMDB number' };
+  var ty = function (x) { return x && x.title ? V.esc(x.title) + (x.y ? ' <span class="dim">(' + x.y + ')</span>' : '') : '?'; };
+  var draw = function () {
+    var j = info.job, last = info.last, list = info.list || [];
+    var head = '<label class="switch"><input type="checkbox" data-tfx-on' + (info.on ? ' checked' : '') + '><span class="sw"></span><span><b>Correct wrong matches by themselves</b><small>After new details come in, and every few hours. Off: only when you press Check now.</small></span></label>';
+    var job = j ? '<div class="tf-job"><div class="tf-h"><b>Checking matches</b><span class="sp"></span><button class="btn sm" data-tfx-stop>Stop</button></div><div class="bar big"><i style="width:' + (j.total ? j.checked / j.total * 100 : 0).toFixed(1) + '%"></i></div><div class="dim small">' + j.checked.toLocaleString() + ' of ' + V.plural(j.total, 'title') + ' · ' + j.asked + ' looked up on TMDB · ' + j.fixed + ' corrected' + (j.current ? '<br>' + V.esc(j.current) : '') + '</div></div>'
+      : last && last.finished ? '<p class="dim small">' + (last.error ? 'Stopped: ' + V.esc(last.error) : (last.stopped ? 'Stopped' : 'Last checked') + ' ' + V.fmtAgo(last.finished)) + ' — ' + V.plural(last.checked, 'title') + ', ' + last.asked + ' looked up on TMDB, ' + last.fixed + ' corrected.</p>' : '';
+    var shown = more ? list : list.slice(0, 12);
+    var rows = shown.map(function (f) {
+      return '<li class="tfx-row' + (f.undone ? ' undone' : '') + '"><div class="tfx-t"><b>' + V.esc(f.n) + '</b>' + (f.y ? ' <span class="dim">(' + f.y + ')</span>' : '') + ' <span class="dim small">· ' + (f.t === 'show' ? 'series' : 'film') + ' · ' + V.fmtAgo(f.at) + '</span>' +
+        '<div class="small">' + ty(f.from) + ' → ' + ty(f.to) + '</div><div class="dim small">Why: ' + (WHY[f.why] || V.esc(f.why)) + '</div></div>' +
+        (f.undone ? '<span class="dim small">Undone</span>' : '<button class="btn sm" data-tfx-undo="' + V.esc(f.id) + '">Undo</button>') + '</li>';
+    }).join('');
+    box.innerHTML = head + job + '<div class="btn-row"' + (j ? ' hidden' : '') + '><button class="btn" data-tfx-run>' + V.icon('refresh') + ' Check now</button></div>' +
+      (list.length ? '<ul class="tfx-list">' + rows + '</ul>' + (list.length > 12 && !more ? '<button class="btn sm" data-tfx-more>Show all ' + list.length + '</button>' : '') : '<p class="dim small">No corrections yet.</p>');
+  };
+  var load = function () {
+    clearTimeout(timer);
+    return V.api('/api/admin/tmdb/fixes').then(function (r) {
+      info = r; draw();
+      if (r.job && box.isConnected) timer = setTimeout(load, 2000);
+    }).catch(function (e) { box.innerHTML = '<p class="err">' + V.esc(e.message) + '</p>'; });
+  };
+  box.addEventListener('click', function (e) {
+    var u = e.target.closest('[data-tfx-undo]');
+    if (u) {
+      u.disabled = true;
+      V.api('/api/admin/tmdb/fixes/' + encodeURIComponent(u.dataset.tfxUndo) + '/undo', { method: 'POST' }).then(function () { V.toast('Back to the match it had — kept as picked by hand'); load(); }).catch(function (er) { u.disabled = false; V.fail(er); });
+    }
+    if (e.target.closest('[data-tfx-run]')) V.api('/api/admin/tmdb/fixes', { method: 'POST' }).then(load).catch(V.fail);
+    if (e.target.closest('[data-tfx-stop]')) V.del('/api/admin/tmdb/fixes').then(load);
+    if (e.target.closest('[data-tfx-more]')) { more = true; draw(); }
+  });
+  box.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t.hasAttribute('data-tfx-on')) return;
+    V.adminSave({ tmdbAutoFix: t.checked }, 'Saved').then(function () { info.on = t.checked; }).catch(function () { t.checked = !t.checked; });
+  });
+  load();
+  var prevCleanup = V.pageCleanup;
+  V.pageCleanup = function () { clearTimeout(timer); if (prevCleanup) prevCleanup(); };
 };
 
 /** Admin → Recommendations → Page extras: every title's page fetched from TMDB ahead of anyone opening it (lib/routes-p14.js). */

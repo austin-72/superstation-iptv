@@ -3,6 +3,31 @@
 What was changed and fixed, in more detail than the README (which says what the app does). Newer first; versions
 from 2.7 on are named. The release notes on GitHub list each version.
 
+## 2.8.15
+
+- **Wrong TMDB matches are found and put right by themselves.** Every matched film and series is checked against
+  what its provider says about it, and when the evidence clearly says the match is another title, TMDB is asked for
+  the entries of that name and the match moves to the one that fits:
+  - **The cast:** every series in a provider's list comes with its cast. When none of it is in the matched entry's
+    (three or more names each side), the entry of that name whose cast it is gets the match — "Whose Line Is It
+    Anyway?" from 2013 matched to the 1988 one, the Russian "Traffic Light" to the American one, "Muppet Babies" from
+    1984 to the 2018 series. Names are compared however the provider wrote them (in another order, run together,
+    with or without accents). An English dub's cast against the Japanese one finds no entry whose cast agrees, so
+    nothing changes.
+  - **The length:** a film whose file runs far from the matched entry's running time (over 40% off), going by the real
+    length once someone has watched it (or the provider's), moves to the entry of that name that runs as long.
+  - **The name and the year:** a match by another name from another year ("Hamilton" (2020) matched to "Bethany
+    Hamilton: Unstoppable" (2019), "Police Story 3: Super Cop" (1992) to "Supercop 2") moves to the one entry with
+    this name from the provider's year — never when there are two, or the cast or length says the match is right.
+  - **The provider's own TMDB number**, when it came after the name was looked up: taken when it's this title (the
+    same name, a year that fits) and fits better than the match — not when it's another film's ("BLAME!" given the
+    number of "Blame", 2018).
+  A match is only changed for one that clearly fits better (the same name, a year that fits, and what was wrong put
+  right); one picked by hand is never touched, and each title is asked about again only when its evidence changes.
+  It runs after new details come in, at start-up and every six hours. **Admin → Recommendations → Corrected
+  matches** lists every change (what it was, what it is now, and why), with **Undo** (the old match is then kept as
+  picked by hand), **Check now**, and a switch to turn it off.
+
 ## 2.8.14
 
 - **How the stream relay handles films and episodes is set in the app** (Admin → Network & proxies → **Films and

@@ -50,7 +50,8 @@ const { UserData } = require('./lib/userdata');
 const { Hub, Social } = require('./lib/social');
 const { Bans, norm: ipNorm } = require('./lib/bans');
 const { BadCopies, copyId } = require('./lib/badcopies');
-const { Tmdb, ownYear: tmdbOwnYear } = require('./lib/tmdb');
+const { Tmdb, ownYear: tmdbOwnYear, yearConflict: tmdbYearConflict } = require('./lib/tmdb');
+const { TmdbFixes, run: runTmdbFix } = require('./lib/tmdbfix');
 const { Recs } = require('./lib/recs');
 const { Markers } = require('./lib/markers');
 const { ConnTest } = require('./lib/conntest');
@@ -152,6 +153,8 @@ const hub = new Hub();
 const bans = new Bans(D);
 // Copies that play something else (another title under this one's name), hidden by the admin: lib/badcopies.js.
 const badCopies = new BadCopies(D);
+// TMDB matches put right in the background, from what the provider says about each title: lib/tmdbfix.js.
+const tmdbFixes = new TmdbFixes(D);
 const social = new Social(D, { hub, accounts });
 // The admin's channel edits, guide offsets and parental locks (Admin → Channels).
 const overrides = new Overrides(D);
@@ -2851,7 +2854,7 @@ route('PUT', '/api/admin/settings', async (req, res, p, q, ctx) => {
   if (['everyone', 'admin', 'off'].includes(b.subGen)) s.subGen = b.subGen; // (who may have subtitles made from a film's sound: lib/routes-p13.js)
   if (b.off && typeof b.off === 'object' && !Array.isArray(b.off)) s.off = Object.fromEntries(AREAS.filter((a) => b.off[a] === true).map((a) => [a, true]));
   if (Array.isArray(b.defaultLangs)) s.defaultLangs = b.defaultLangs.map(String);
-  for (const k of ['showUnknownLang', 'adminOnlyProfiles', 'allowDownloads', 'allowParties', 'introDetection', 'tmdbAuto', 'tmdbTitles', 'smartFailover', 'phoneDock', 'tapToPause', 'quickStart', 'warmStart', 'tmdbLangs', 'guestProfile', 'guestKids', 'guestAdult', 'noAdult']) if (k in b) s[k] = !!b[k];
+  for (const k of ['showUnknownLang', 'adminOnlyProfiles', 'allowDownloads', 'allowParties', 'introDetection', 'tmdbAuto', 'tmdbAutoFix', 'tmdbTitles', 'smartFailover', 'phoneDock', 'tapToPause', 'quickStart', 'warmStart', 'tmdbLangs', 'guestProfile', 'guestKids', 'guestAdult', 'noAdult']) if (k in b) s[k] = !!b[k];
   if (['', '0', '1', '2', '3'].includes(String(b.guestMaxCert === undefined ? 'x' : b.guestMaxCert))) s.guestMaxCert = String(b.guestMaxCert);
   if (b.guestProfile === false) for (const id of [...accounts.guests.keys()]) accounts.endGuest(id); // (guests turned off: those in now leave)
   // TMDB: each episode's details when a series is opened ('open') or only when fetched here ('off'); its language.
@@ -3226,6 +3229,8 @@ function startEnrich(auto = false, opts = {}) {
     job.status.running = false; job.status.finished = Date.now(); job.status.current = '';
     lastEnrich = job.status;
     if (enrichJob === job) enrichJob = null;
+    // (New details in: the matches are checked against what the provider says — lib/tmdbfix.js.)
+    if (job.status.found) scheduleTmdbFix(2 * 60e3);
   });
   return job.status;
 }
@@ -3273,6 +3278,83 @@ function tmdbRebuild(ms) {
   scheduleRebuild(ms);
   return true;
 }
+
+// ---- TMDB matches put right (lib/tmdbfix.js; Admin → Recommendations → Corrected matches)
+let fixJob = null, lastFix = null, fixTimer = null;
+/** How long each film actually runs, from what the household has watched (the player's length of the file). */
+function realLengths() {
+  const all = new Map();
+  for (const pr of accounts.profiles) {
+    let prog;
+    try { prog = userdata.of(pr.id).data.progress || {}; } catch { continue; }
+    for (const [k, r] of Object.entries(prog)) {
+      if (!r || r.sk || (r.t && r.t !== 'movie') || !(r.d > 600) || r.d > 6 * 3600) continue;
+      (all.get(k) || all.set(k, []).get(k)).push(r.d);
+    }
+  }
+  const out = new Map();
+  for (const [k, a] of all) { a.sort((x, y) => x - y); out.set(k, a[Math.floor(a.length / 2)]); }
+  return out;
+}
+/** Check every film's and series' TMDB match against the provider's evidence, and correct the clearly wrong ones. */
+function startTmdbFix(auto = false) {
+  if (fixJob) return fixJob.status;
+  if (!tmdb.enabled() || !catalog) return null;
+  if (auto && (settings().tmdbAutoFix === false || enrichJob)) return null;
+  const lengths = realLengths();
+  const items = catalog.items.filter((it) => it.t === 'movie' || it.t === 'show');
+  const job = fixJob = { status: { running: true, started: Date.now(), auto, total: items.length, checked: 0, asked: 0, fixed: 0, current: '' } };
+  const fixed = [];
+  Tmdb.job(() => runTmdbFix(items, {
+    tmdb, fixes: tmdbFixes, same: Titles.sameTitle, ownYear: tmdbOwnYear, conflict: (it, y) => tmdbYearConflict(it, y),
+    realLength: (k) => lengths.get(k) || 0, stop: () => fixJob !== job, status: job.status,
+    // (The right entry's details fetched now, so the title shows them as soon as the catalogue is built again.)
+    onFix: async (it, pick) => { fixed.push(`“${it.n}” → ${pick.title}${pick.year ? ` (${pick.year})` : ''}`); await tmdb.details(it); },
+  })).catch((e) => { job.status.error = e.message; }).finally(() => {
+    job.status.running = false; job.status.finished = Date.now(); job.status.current = '';
+    lastFix = job.status;
+    if (fixJob === job) fixJob = null;
+    if (fixed.length) {
+      log(`TMDB: corrected ${fixed.length} matches the provider’s details said were another title: ${fixed.slice(0, 8).join(', ')}${fixed.length > 8 ? ' …' : ''}`);
+      if (!tmdbRebuild(5000)) { catalog.metaChanged(); hub.toAll('catalog', { version: catalog.version }); }
+      for (const pr of accounts.profiles) recs.touch(pr.id, 30000);
+    }
+  });
+  return job.status;
+}
+function scheduleTmdbFix(ms) {
+  clearTimeout(fixTimer);
+  fixTimer = setTimeout(() => { try { startTmdbFix(true); } catch (e) { log('TMDB corrections:', e.message); } }, ms);
+  if (fixTimer.unref) fixTimer.unref();
+}
+// (At start-up, after the first lookups have had their turn, and every six hours: new evidence comes with watching.)
+scheduleTmdbFix(10 * 60e3);
+{ const t = setInterval(() => { if (!fixJob) scheduleTmdbFix(1000); }, 6 * 3600e3); if (t.unref) t.unref(); }
+route('GET', '/api/admin/tmdb/fixes', (req, res, p, q, ctx) => {
+  requireAdmin(ctx);
+  return { on: settings().tmdbAutoFix !== false, job: fixJob ? fixJob.status : null, last: lastFix, list: tmdbFixes.list.slice(0, 200) };
+});
+route('POST', '/api/admin/tmdb/fixes', (req, res, p, q, ctx) => {
+  requireAdmin(ctx);
+  if (!tmdb.enabled()) throw new HttpError(400, 'Add a TMDB key first.');
+  return { ok: true, job: startTmdbFix(false) };
+});
+route('DELETE', '/api/admin/tmdb/fixes', (req, res, p, q, ctx) => { requireAdmin(ctx); if (fixJob) { fixJob.status.stopped = true; lastFix = fixJob.status; } fixJob = null; return { ok: true }; });
+// Undo: the match it had, kept for good (picked by hand, as far as the checks go: they never touch it again).
+route('POST', '/api/admin/tmdb/fixes/:id/undo', async (req, res, p, q, ctx) => {
+  const a = requireAdmin(ctx);
+  const f = tmdbFixes.get(p.id);
+  if (!f) throw new HttpError(404, 'That correction isn’t listed any more.');
+  if (f.undone) return { ok: true, fix: f };
+  const it = catalog.get(f.k);
+  if (!it) throw new HttpError(404, 'That title isn’t in the catalogue any more.');
+  const m = await tmdb.setMatch(it, { id: f.from.id, type: f.from.type });
+  if (m) applyMeta(it, m);
+  tmdbFixes.mark(f.id, { undone: Date.now() });
+  log(`${a.name} undid the TMDB correction of “${it.n}” (back to ${f.from.title}${f.from.y ? ` (${f.from.y})` : ''})`);
+  if (!tmdbRebuild(3000)) { catalog.metaChanged(); hub.toAll('catalog', { version: catalog.version }); }
+  return { ok: true, fix: f };
+});
 
 // ---- smarter categories (lib/smartcats.js; Admin → Categories)
 let smartTagging = null;

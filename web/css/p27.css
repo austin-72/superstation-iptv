@@ -784,3 +784,9 @@ dialog.dlg[open]::backdrop { animation: artFade .2s ease-out; }
 .rc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .2rem 1rem; }
 .rc-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.2rem; margin: .3rem 0 .6rem; }
 .rc-status { margin: .2rem 0 .6rem; }
+
+/* Admin → Recommendations → Corrected matches */
+.tfx-list { list-style: none; margin: 12px 0 8px; padding: 0; display: grid; gap: 6px; }
+.tfx-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(255, 255, 255, .04); }
+.tfx-row .tfx-t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.tfx-row.undone { opacity: .6; }
