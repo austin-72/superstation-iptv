@@ -391,6 +391,15 @@ PP.load = function (it, opts) {
       // (Smart failover: the server found this copy's provider not answering and another copy working — the other
       // ways of playing this one would only time out too.)
       if (i < plan.length - 1 && !/decode|format|codec/i.test(e.message) && self._raceSaysSwitch(self._raced)) { if (opts.onFail) { self._teardownMedia(); return opts.onFail(e); } return self._failed(e); }
+      // The server's conversion of this copy got nothing from its provider in half a minute: converting it another
+      // way (a full conversion after a remux) needs the same bytes and only waits another half a minute — another copy
+      // instead, when there is one. ("Lilo & Stitch": the remux, then the full conversion, each 30 s; copy 10 then
+      // started in 5.)
+      if (a.via === 'session' && /didn’t start in time/.test(e.message) && self._altsLeft && self._altsLeft.length && !opts.only && plan.slice(i + 1).every(function (x) { return x.via === 'session'; })) {
+        if (V.crumb) V.crumb('player', 'the server’s conversion got nothing in time: another copy instead');
+        if (opts.onFail) { self._teardownMedia(); return opts.onFail(e); }
+        return self._failed(e);
+      }
       // The server doesn't have it (taken off the lists, or hidden for this profile): no other way or copy will either.
       if (e.status === 404 && /isn’t available/.test(e.message)) { self._altsLeft = []; plan = plan.slice(0, i + 1); }
       if (i < plan.length - 1) self._lastWhy = shortWhy(e);
@@ -501,10 +510,12 @@ PP._lengthCheck = function (token) {
     if (V.crumb) V.crumb('player', 'copy ' + (self.alt + 2) + ' is ' + said + ': not the right film?');
     if (V.reportError) V.reportError('copy', { message: 'Doesn’t look like the right film: ' + it.n + (it.y ? ' (' + it.y + ')' : '') }, { item: { k: it.k, t: it.t, n: it.n, y: it.y, alt: self.alt, backups: (it.a || []).length }, real: Math.round(real), expected: it.d, said: 'This copy is ' + said + '.' });
     var next = (self._altsLeft || []).filter(function (a) { return !lenChecked[it.k + '|' + a]; })[0];
-    // (Another copy, from where this one started — unless it's been watched a while already: then the viewer's
-    // happy with it, whatever its length.)
-    var from = self._loadAt || 0;
-    if (next !== undefined && self.position - from < 120) {
+    // (Another copy, from where this one started (or where the viewer has since gone) — unless it's been playing a
+    // while already: then the viewer's happy with it, whatever its length. Counted in time, not by where it's got to:
+    // a skip forward isn't watching — "The Odyssey", skipped to 8 minutes in its first seconds, stayed on a copy half
+    // its length.)
+    var from = Math.max(self._loadAt || 0, self.started ? self.position || 0 : 0);
+    if (next !== undefined && Date.now() - (self._startWall || 0) < 150e3) {
       self._altsLeft = self._altsLeft.filter(function (a) { return a !== next; });
       V.toast('That copy didn’t look like the right film (' + V.fmtLen(real).trim() + ' long, not ' + V.fmtLen(it.d).trim() + '). Trying another…', { ms: 6000 });
       self.load(it, { alt: next, quiet: true, startAt: from || undefined });
@@ -1146,6 +1157,10 @@ PP._attachHls = function (a, token, url, rel, bufGoal) {
       };
       // (Buffer size and how much live TV to keep for rewinding: see tune.js.)
       if (V.tune) V.tune.hls(hcfg, this);
+      // (A TV's browser, with a film: 15 s kept behind, not a minute. At the 30–50 Mbit/s of a film converted on the
+      // server that minute is 200–400 MB a TV hasn't the memory for, and clearing it out is the likely cause of
+      // Samsung TVs freezing for 8–11 s mid-film. Going back further fetches it again from the server.)
+      if (this.vod && V.device && V.device.tv) hcfg.backBufferLength = Math.min(hcfg.backBufferLength, 15);
       var hls = new Hls(hcfg);
       this.hls = hls;
       var self = this;
@@ -1464,6 +1479,7 @@ PP._failed = function (err) {
 
 PP._afterStart = function () {
   this.started = true;
+  this._startWall = Date.now(); // (when this copy started playing: _lengthCheck)
   this._relayHoldSince = 0;
   // (Playing again for half a minute: the next drop gets its full set of reconnects again.)
   var tkR = this.token, meR = this;

@@ -3,6 +3,26 @@
 What was changed and fixed, in more detail than the README (which says what the app does). Newer first; versions
 from 2.7 on are named. The release notes on GitHub list each version.
 
+## 2.8.16
+
+- **A corrected TMDB match can't move a whole title to a namesake any more.** "The Odyssey" (2026) was moved from the
+  long film to an 86-minute one of the same name and year: the provider's number for the title was the namesake's, and
+  someone had watched its first copy (the namesake's) — while the other 20 copies are the long film. Now a film's length
+  only counts as evidence when it has one copy, and the provider's number never replaces a match already of the same
+  name and year (unless the cast says so). Corrections made before that these rules wouldn't make are **put back by
+  themselves** at the next check, and listed as such in Admin → Recommendations → Corrected matches.
+- **A copy that doesn't look like the right film is switched for another even after skipping forward.** It used to
+  count where the film had got to, so a skip in its first seconds ("The Odyssey", to 8 minutes) counted as watching it,
+  and the wrong copy stayed. Now it's the time it has been playing.
+- **When the server's conversion of a copy gets nothing from its provider in time, another copy is tried** instead of
+  converting the same copy another way and waiting another 30 seconds ("Lilo & Stitch": a full minute on one slow copy
+  before another started in 5 seconds).
+- **Smart TVs keep 15 seconds of a film behind what's playing instead of a minute**: at the bitrate of a film converted
+  on the server that's hundreds of megabytes, and clearing it out is the likely cause of Samsung TVs freezing for 8–11
+  seconds mid-film.
+- A font from another site stopped by the page's security policy is no longer reported as an error: the app has none,
+  so it was put in the page by something in the browser (an extension or a translation), and nothing is missing.
+
 ## 2.8.15
 
 - **Wrong TMDB matches are found and put right by themselves.** Every matched film and series is checked against

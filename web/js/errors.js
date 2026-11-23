@@ -272,6 +272,10 @@
     // (Nor a TV's own browser opening a page of its own on the TV itself — Samsung's does, on 127.0.0.1 — when this
     // page isn't on that machine: nothing of the app's.)
     if (/^(frame|child)-src/.test(String(e.violatedDirective || e.effectiveDirective || '')) && /^https?:\/\/(127\.\d+\.\d+\.\d+|localhost|\[::1\])(:|\/|$)/i.test(what) && !/^(127\.|localhost$|\[::1\]$)/.test(location.hostname)) { crumb('log', 'security policy: the device’s own browser opened a page on itself'); return; }
+    // (Nor a font from another site: the app has none — its fonts are its own or the device's — so one asked for was
+    // put in the page by something in the browser (an extension, a translation): the text shows in another font,
+    // nothing of the app's is missing. Google's fonts, at page load, on one person's computer.)
+    if (/^font-src/.test(String(e.effectiveDirective || e.violatedDirective || '')) && /^https?:/i.test(what)) { crumb('log', 'security policy: a font from ' + what.split('/').slice(0, 3).join('/') + ' something in the browser added'); return; }
     var m = /^(https?|wss?):\/\/[^/?#]+/i.exec(what);
     what = m ? m[0] : what.slice(0, 20);
     cspSeen++;

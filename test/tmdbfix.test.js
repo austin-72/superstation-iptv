@@ -130,3 +130,29 @@ test('the provider’s number isn’t taken over a match that fits better', () =
   assert.deepStrictEqual([r.asked, r.fixed], [1, 0]);
   assert.strictEqual(tmdb.map.data.m.B.id, 9);
 }));
+
+test('one copy of many is no evidence for the title — and a correction a rule no longer allows is put back', () => withFixes(async (fixes) => {
+  // "The Odyssey" (2026): 21 copies of the 173-minute film, the first an 86-minute namesake (the provider's number is
+  // the namesake's, and someone watched that copy).
+  const it = { k: 'O', t: 'movie', n: 'The Odyssey', y: 2026, tmdb: '1698863', d: 0, alts: Array.from({ length: 20 }, (_, i) => ({ u: 'x' + i })) };
+  const meta = { O: { tmdb: 1368337, title: 'The Odyssey', y: 2026, d: 173 * 60 } };
+  const tmdb = fakeTmdb({ '/movie/1698863': film(1698863, 'The Odyssey', 2026, 86) }, { O: { id: 1368337, type: 'movie' } }, meta);
+  const r = await run([it], deps(tmdb, fixes, { realLength: () => 86 * 60 }));
+  assert.strictEqual(r.fixed, 0);
+  assert.strictEqual(tmdb.map.data.m.O.id, 1368337);
+  assert.ok(!tmdb.asked.length, 'a match already of this name and year: the namesake’s number isn’t even looked up');
+  // A correction made before (the namesake's number taken): put back, and not checked again.
+  tmdb.map.data.m.O = { id: 1698863, type: 'movie', vf: 'list', rc: 1, list: 1 };
+  tmdb.meta.data.m.O = { tmdb: 1698863, title: 'The Odyssey', y: 2026, d: 86 * 60 };
+  const id = fixes.add({ k: 'O', n: 'The Odyssey', t: 'movie', y: 2026, why: 'list', at: 1, from: { id: 1368337, type: 'movie', title: 'The Odyssey', y: 2026 }, to: { id: 1698863, type: 'movie', title: 'The Odyssey', y: 2026 } });
+  const keep = fixes.add({ k: 'W', n: 'Wonder', t: 'movie', y: 2017, why: 'list', at: 1, from: { id: 297762, type: 'movie', title: 'Wonder Woman', y: 2017 }, to: { id: 406997, type: 'movie', title: 'Wonder', y: 2017 } });
+  tmdb.map.data.m.W = { id: 406997, type: 'movie', vf: 'list', rc: 1, list: 1 };
+  const r2 = await run([it, { k: 'W', t: 'movie', n: 'Wonder', y: 2017 }], deps(tmdb, fixes));
+  assert.strictEqual(r2.putBack, 1);
+  assert.deepStrictEqual(tmdb.map.data.m.O, { id: 1368337, type: 'movie', vf: 'kept', rc: 1 });
+  assert.strictEqual(tmdb.meta.data.m.O, undefined);
+  assert.ok(fixes.get(id).undone && fixes.get(id).auto);
+  assert.strictEqual(tmdb.map.data.m.W.id, 406997, '“Wonder” (not “Wonder Woman”) stays corrected');
+  assert.ok(!fixes.get(keep).undone);
+  assert.strictEqual((await run([it], deps(tmdb, fixes))).putBack, 0, 'only once');
+}));

@@ -816,12 +816,12 @@ V.tmdbFixesPanel = function (box, s) {
     var j = info.job, last = info.last, list = info.list || [];
     var head = '<label class="switch"><input type="checkbox" data-tfx-on' + (info.on ? ' checked' : '') + '><span class="sw"></span><span><b>Correct wrong matches by themselves</b><small>After new details come in, and every few hours. Off: only when you press Check now.</small></span></label>';
     var job = j ? '<div class="tf-job"><div class="tf-h"><b>Checking matches</b><span class="sp"></span><button class="btn sm" data-tfx-stop>Stop</button></div><div class="bar big"><i style="width:' + (j.total ? j.checked / j.total * 100 : 0).toFixed(1) + '%"></i></div><div class="dim small">' + j.checked.toLocaleString() + ' of ' + V.plural(j.total, 'title') + ' · ' + j.asked + ' looked up on TMDB · ' + j.fixed + ' corrected' + (j.current ? '<br>' + V.esc(j.current) : '') + '</div></div>'
-      : last && last.finished ? '<p class="dim small">' + (last.error ? 'Stopped: ' + V.esc(last.error) : (last.stopped ? 'Stopped' : 'Last checked') + ' ' + V.fmtAgo(last.finished)) + ' — ' + V.plural(last.checked, 'title') + ', ' + last.asked + ' looked up on TMDB, ' + last.fixed + ' corrected.</p>' : '';
+      : last && last.finished ? '<p class="dim small">' + (last.error ? 'Stopped: ' + V.esc(last.error) : (last.stopped ? 'Stopped' : 'Last checked') + ' ' + V.fmtAgo(last.finished)) + ' — ' + V.plural(last.checked, 'title') + ', ' + last.asked + ' looked up on TMDB, ' + last.fixed + ' corrected' + (last.putBack ? ', ' + last.putBack + ' put back' : '') + '.</p>' : '';
     var shown = more ? list : list.slice(0, 12);
     var rows = shown.map(function (f) {
       return '<li class="tfx-row' + (f.undone ? ' undone' : '') + '"><div class="tfx-t"><b>' + V.esc(f.n) + '</b>' + (f.y ? ' <span class="dim">(' + f.y + ')</span>' : '') + ' <span class="dim small">· ' + (f.t === 'show' ? 'series' : 'film') + ' · ' + V.fmtAgo(f.at) + '</span>' +
         '<div class="small">' + ty(f.from) + ' → ' + ty(f.to) + '</div><div class="dim small">Why: ' + (WHY[f.why] || V.esc(f.why)) + '</div></div>' +
-        (f.undone ? '<span class="dim small">Undone</span>' : '<button class="btn sm" data-tfx-undo="' + V.esc(f.id) + '">Undo</button>') + '</li>';
+        (f.undone ? '<span class="dim small">' + (f.auto ? 'Put back by itself' : 'Undone') + '</span>' : '<button class="btn sm" data-tfx-undo="' + V.esc(f.id) + '">Undo</button>') + '</li>';
     }).join('');
     box.innerHTML = head + job + '<div class="btn-row"' + (j ? ' hidden' : '') + '><button class="btn" data-tfx-run>' + V.icon('refresh') + ' Check now</button></div>' +
       (list.length ? '<ul class="tfx-list">' + rows + '</ul>' + (list.length > 12 && !more ? '<button class="btn sm" data-tfx-more>Show all ' + list.length + '</button>' : '') : '<p class="dim small">No corrections yet.</p>');

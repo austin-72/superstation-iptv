@@ -3309,13 +3309,13 @@ function startTmdbFix(auto = false) {
     tmdb, fixes: tmdbFixes, same: Titles.sameTitle, ownYear: tmdbOwnYear, conflict: (it, y) => tmdbYearConflict(it, y),
     realLength: (k) => lengths.get(k) || 0, stop: () => fixJob !== job, status: job.status,
     // (The right entry's details fetched now, so the title shows them as soon as the catalogue is built again.)
-    onFix: async (it, pick) => { fixed.push(`“${it.n}” → ${pick.title}${pick.year ? ` (${pick.year})` : ''}`); await tmdb.details(it); },
+    onFix: async (it, pick) => { fixed.push(`${pick.putBack ? 'put back: ' : ''}“${it.n}” → ${pick.title}${pick.year ? ` (${pick.year})` : ''}`); await tmdb.details(it); },
   })).catch((e) => { job.status.error = e.message; }).finally(() => {
     job.status.running = false; job.status.finished = Date.now(); job.status.current = '';
     lastFix = job.status;
     if (fixJob === job) fixJob = null;
     if (fixed.length) {
-      log(`TMDB: corrected ${fixed.length} matches the provider’s details said were another title: ${fixed.slice(0, 8).join(', ')}${fixed.length > 8 ? ' …' : ''}`);
+      log(`TMDB: corrected ${fixed.length} matches the provider’s details said were another title (or put back ones a rule no longer allows): ${fixed.slice(0, 8).join(', ')}${fixed.length > 8 ? ' …' : ''}`);
       if (!tmdbRebuild(5000)) { catalog.metaChanged(); hub.toAll('catalog', { version: catalog.version }); }
       for (const pr of accounts.profiles) recs.touch(pr.id, 30000);
     }
