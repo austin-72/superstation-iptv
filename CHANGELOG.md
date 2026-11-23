@@ -20,6 +20,10 @@ from 2.7 on are named. The release notes on GitHub list each version.
 - **Smart TVs keep 15 seconds of a film behind what's playing instead of a minute**: at the bitrate of a film converted
   on the server that's hundreds of megabytes, and clearing it out is the likely cause of Samsung TVs freezing for 8–11
   seconds mid-film.
+- **The Android TV / Fire TV app comes ready to install with every release** (`superstation-tv.apk`, on the
+  Releases page; `releases/latest/download/superstation-tv.apk` is always the newest, short enough to type into the
+  Downloader app on a Fire TV) — no Android Studio needed. Its version is now the server's. The instructions in
+  `tv-apps/README.md` start with downloading it.
 - A font from another site stopped by the page's security policy is no longer reported as an error: the app has none,
   so it was put in the page by something in the browser (an extension or a translation), and nothing is missing.
 

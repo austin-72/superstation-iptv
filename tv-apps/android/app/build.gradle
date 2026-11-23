@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+// The app's version is the server's (package.json): 2.8.16 → "2.8.16", and 20816 for Android to tell newer from older.
+def serverVersion = { ->
+    try { return new groovy.json.JsonSlurper().parse(rootProject.file('../../package.json')).version as String } catch (ignored) { return '1.0.0' }
+}()
+def versionNumber = serverVersion.tokenize('.').collect { it.replaceAll('[^0-9]', '') ?: '0' }.with { p -> (p[0] as int) * 10000 + (p.size() > 1 ? (p[1] as int) * 100 : 0) + (p.size() > 2 ? (p[2] as int) : 0) }
+
 android {
     namespace 'org.superstation.tv'
     compileSdk 34
@@ -10,8 +16,8 @@ android {
         applicationId 'org.superstation.tv'
         minSdk 22        // Fire OS 5 and Android TV 5.1 onwards
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode versionNumber
+        versionName serverVersion
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8

@@ -13,7 +13,7 @@ the app (Back at Home, twice, leaves), and on Samsung the coloured, number and m
 
 | Folder | For | You need |
 |---|---|---|
-| `android/` | Android TV, Google TV, Fire TV (also phones and tablets) | Android Studio, or the *Android TV app* workflow on GitHub |
+| `android/` | Android TV, Google TV, Fire TV (also phones and tablets) | Nothing: download the APK from the latest release |
 | `tizen/` | Samsung TVs (2016 and later) | Tizen Studio and the TV in developer mode |
 | `webos/` | LG TVs (webOS 3 and later) | LG's webOS CLI and the Developer Mode app on the TV |
 
@@ -27,22 +27,32 @@ language, which is a second player to maintain, not a wrapper. Apple TV is the s
 
 ## Android TV, Google TV, Fire TV
 
-A plain Android project with one screen and no libraries.
+**Download it:** every release comes with the app ready to install, `superstation-tv.apk`, on the
+[Releases](https://github.com/austin-72/superstation-iptv/releases/latest) page. This address is always the newest one, which is handy for typing into a TV:
 
-**With GitHub (no tools on your computer):** on your copy of this repository, open *Actions* → *Android TV app* →
-*Run workflow*. When it finishes, download `superstation-tv` from the run's page and unzip it: that is the APK.
-
-**With Android Studio:** open the `android` folder, let it sync, then *Build → Build APK(s)*.
+```
+https://github.com/austin-72/superstation-iptv/releases/latest/download/superstation-tv.apk
+```
 
 Put it on the TV:
 
-- Fire TV: Settings → My Fire TV → Developer options → turn on *Apps from Unknown Sources* (or *Install unknown
-  apps* for the app you'll install with), then send the APK over with the *Downloader* app or `adb install`.
-- Android TV / Google TV: turn on developer options (Settings → System → About → press *Build* seven times), allow
-  installing unknown apps for your file manager, and open the APK, or use `adb install`.
+- **Fire TV:** install the free **Downloader** app from the Amazon store. Then Settings → My Fire TV → Developer
+  options → *Install unknown apps* → turn it on for Downloader. (No *Developer options*? Settings → My Fire TV →
+  About → press the device's name seven times.) Open Downloader, type the address above, and install.
+- **Android TV / Google TV:** install **Downloader** from the Play Store the same way, or download the APK on a phone
+  and send it over with an app such as *Send Files to TV*. Allow installing unknown apps for the app you use (Settings
+  → Apps → Security & restrictions, or Settings → Privacy → Security). Or `adb install superstation-tv.apk`.
 
-The APK is signed with a debug key. One built on GitHub is signed with a different key each time, so to install a
-newer build over an older one, remove the old one first (the address is all it remembers).
+The first time it opens, it asks for your server's address (the one you open in a browser, such as
+`http://192.168.1.20:8080`).
+
+**Updating:** the app is signed with a different key on each build, so remove the old one before installing a newer
+one (it only remembers the server's address). You rarely need to: everything you see is the server's own pages, so
+it's up to date whenever the server is.
+
+**Building it yourself** (a plain Android project with one screen and no libraries): open the `android` folder in
+Android Studio, let it sync, then *Build → Build APK(s)*. Or on your own copy of this repository on GitHub: *Actions*
+→ *Android TV app* → *Run workflow*, and download `superstation-tv` from the run's page.
 
 ## Samsung (Tizen)
 
