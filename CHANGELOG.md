@@ -3,6 +3,17 @@
 What was changed and fixed, in more detail than the README (which says what the app does). Newer first; versions
 from 2.7 on are named. The release notes on GitHub list each version.
 
+## 2.8.18
+
+- **On a TV, a drop-down list opens in the look's colours.** Clicking the TV guide's group list (with a remote's pointer
+  mode) or tapping it opened the TV's own list, drawn by the TV in white or black whatever the look — a web page can't
+  colour that. On a TV it now opens the app's own menu of choices, the same one OK on the remote opens, in the look's
+  colours; clicking outside or Back closes it. Computers and phones keep their own lists, whose choices are now drawn in
+  the look's colours too where the browser allows (Chrome and Firefox on Windows and Linux).
+- Fixed a test that could fail on a slow machine (GitHub's): a TMDB answer refreshed behind a page could be asked for a
+  second time by a page that read the old one while the first refresh was finishing. Now an answer just refreshed isn't
+  asked for again for a minute.
+
 ## 2.8.17
 
 - **Each copy of a film is measured against its TMDB running time.** Most providers' film info says how long the file

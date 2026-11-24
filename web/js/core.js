@@ -416,10 +416,29 @@ V.selectMenu = function (sel) {
   if (cur !== null) setTimeout(function () { var b = m.querySelector('[data-i="' + cur + '"]'); if (b) { b.focus(); b.scrollIntoView({ block: 'nearest' }); } }, 30);
   return true;
 };
-V.closeMenus = function () { V.$$('.popmenu').forEach(function (m) { var a = m._anchor; m.remove(); if (a && document.activeElement === document.body) a.focus(); }); };
+V.closeMenus = function (by) { V.$$('.popmenu').forEach(function (m) { var a = m._anchor; V._menuClosed = { a: a, by: by || null, t: Date.now() }; m.remove(); if (a && document.activeElement === document.body) a.focus(); }); };
+/**
+ * On a TV, a drop-down list clicked (a remote's pointer mode) or tapped opens the app's own menu too, in the look's
+ * colours: the TV's own list is drawn by the TV in white or black, whatever the look (web pages can't colour it).
+ * Clicking the list again while its menu is open closes it.
+ */
+(function () {
+  var own = function (e) {
+    var sel = e.target && e.target.closest && e.target.closest('select');
+    if (!sel || !V.tvMode || sel.multiple || sel.disabled || sel.closest('dialog')) return;
+    if (e.type === 'mousedown' && e.button !== 0) return;
+    e.preventDefault();
+    var c = V._menuClosed;
+    if (c && c.a === sel && c.by && sel.contains(c.by) && Date.now() - c.t < 500) return; // (that click closed its menu)
+    try { sel.focus({ preventScroll: true }); } catch (x) { sel.focus(); }
+    V.selectMenu(sel);
+  };
+  document.addEventListener('mousedown', own, true);
+  document.addEventListener('touchend', own, { capture: true, passive: false });
+})();
 // (Without Pointer Events — iPhones before iOS 13, older TVs — a press outside is a mousedown or a touchstart.)
 (window.PointerEvent ? ['pointerdown'] : ['mousedown', 'touchstart']).forEach(function (ev) {
-  document.addEventListener(ev, function (e) { if (!(e.target && e.target.closest && e.target.closest('.popmenu'))) V.closeMenus(); }, true);
+  document.addEventListener(ev, function (e) { if (!(e.target && e.target.closest && e.target.closest('.popmenu'))) V.closeMenus(e.target); }, true);
 });
 // (Escape closes only the menu, not the dialog it was opened from as well.)
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && V.$('.popmenu')) { e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); else e.stopPropagation(); V.closeMenus(); } }, true);

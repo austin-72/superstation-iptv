@@ -802,3 +802,8 @@ dialog.dlg[open]::backdrop { animation: artFade .2s ease-out; }
 .tfx-tol { display: block; margin: 10px 0; line-height: 2; }
 .tfx-tol input { width: 4.5em; display: inline-block; margin: 0 4px; padding: 4px 8px; }
 .tfx-tol small { display: block; line-height: 1.4; }
+
+/* A drop-down list's own choices in the look's colours, where the browser lets a page colour them (Chrome and Firefox
+   on Windows and Linux; a TV's, a phone's and a Mac's are drawn by the system — on a TV the app's menu opens instead). */
+select.input option, select.input optgroup { background-color: var(--bg2); color: var(--text); }
+.popmenu.pm-select .pm-i[aria-checked="true"] { color: var(--text); font-weight: 700; }
