@@ -98,6 +98,10 @@
     }
     return false;
   }
+  // Has a mouse (or a TV remote's pointer mode) been used here? Without one, and without touch, keys are all there is.
+  var mouseUsed = false;
+  document.addEventListener('mousemove', function (e) { if (e.movementX || e.movementY) mouseUsed = true; }, { passive: true });
+  var remoteLike = function () { return V.tvMode || (!V.device.touch && !mouseUsed && !!V.device.tv); };
   // Where focus last was (page position), for when what had it disappears.
   var last = null;
   document.addEventListener('focusin', function (e) {
@@ -152,6 +156,8 @@
       var card = t.closest('a.card'), ent = V.entry(card.dataset.k);
       if (ent) { e.preventDefault(); V.itemMenu(card, ent); return; }
     }
+    // OK on a drop-down list: the app's own menu of its choices, which a remote can walk (V.selectMenu).
+    if (k === 'Enter' && t && t.tagName === 'SELECT' && !e.repeat && !t.multiple && V.selectMenu && V.selectMenu(t)) { e.preventDefault(); return; }
     // OK on a remote is Enter: tick a checkbox or pick a radio button (browsers only do that with Space).
     if (k === 'Enter' && t && t.tagName === 'INPUT' && (t.type === 'checkbox' || t.type === 'radio') && !e.repeat) { e.preventDefault(); t.click(); return; }
     if (!dir || e.altKey || e.ctrlKey || e.metaKey) return;
@@ -165,7 +171,9 @@
       if (V.tvMode && (dir === 'left' || dir === 'right') && t.tagName === 'INPUT' && t.type !== 'range') {
         try { edge = dir === 'right' ? t.selectionEnd >= t.value.length : t.selectionStart <= 0 && t.selectionEnd <= 0; } catch (e2) { edge = true; }
       }
-      if (!(t.tagName === 'SELECT' && V.tvMode) && !(t.tagName === 'INPUT' && vert) && !(vert && t.closest('.vp-seek')) && !ta && !edge) return;
+      // (A drop-down list, with a remote — on a TV, or nothing but keys used here: the arrows move on, not through its
+      // choices, which would change it — and the page — with every press. OK opens its choices.)
+      if (!(t.tagName === 'SELECT' && remoteLike()) && !(t.tagName === 'INPUT' && vert) && !(vert && t.closest('.vp-seek')) && !ta && !edge) return;
     }
     var pl2 = V.$('#player-layer');
     if (pl2 && !pl2.hidden && !pl2.classList.contains('mini') && !(t && t.closest('.vp-menu, .vp-side, .vp-ctrl, .vp-top, .vp-center, .vp-msg, .vp-upnext, .vp-end, .vp-live, .vp-skip, dialog'))) return;

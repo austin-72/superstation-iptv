@@ -30,10 +30,13 @@ test('the verdict: yes, no, or too little to say', () => {
   assert.strictEqual(C.castVerdict('', ['Cat Brown']), '');
 });
 
-test('lengths: within 15% yes, more than 40% off no; minutes where seconds go', () => {
+test('lengths: within two minutes (or a PAL copy’s 4% shorter) yes, more than 15% off no; minutes where seconds go', () => {
   assert.strictEqual(C.lengthVerdict(6840, 6840), 'yes');
-  assert.strictEqual(C.lengthVerdict(6840 * 1.12, 6840), 'yes');
-  assert.strictEqual(C.lengthVerdict(6840 * 1.3, 6840), '');
+  assert.strictEqual(C.lengthVerdict(6840 + 100, 6840), 'yes');
+  assert.strictEqual(C.lengthVerdict(6840 + 300, 6840), '', 'five minutes off: not the same length, not another film either');
+  assert.strictEqual(C.lengthVerdict(6840 + 60, 6840, 30), '', 'the admin’s half a minute');
+  assert.strictEqual(C.lengthVerdict(Math.round(6840 * 24 / 25), 6840), 'yes', 'a PAL copy runs 4% shorter');
+  assert.strictEqual(C.lengthVerdict(6840 * 1.3, 6840), 'no');
   assert.strictEqual(C.lengthVerdict(1500, 5400), 'no', 'a 25-minute file against a 90-minute film');
   assert.strictEqual(C.lengthVerdict(0, 5400), '');
   // The Goonies: "114" from the provider, 114 minutes on TMDB.
@@ -87,13 +90,16 @@ test('a match the evidence agrees with is never switched', () => {
 });
 
 test('the length: a film that runs far longer or shorter than TMDB’s entry, and one of the same name that fits', () => {
-  // "I.T." (2016, 95 min) matched to "It" (2017, 135 min): 30% off isn't enough to say.
+  // "I.T." (2016, 95 min) matched to "It" (2017, 135 min): the file runs 95 minutes, the entry of that name as long.
   const ev = { name: 'I.T.', year: 0, length: 95 * 60 };
   const cur = { id: 1, title: 'It', year: 2017, runtime: 135 * 60 };
-  assert.strictEqual(C.contradicted(C.fit(ev, cur, same)), '', '95 minutes against 135 is between: nothing said');
+  assert.strictEqual(C.contradicted(C.fit(ev, cur, same)), 'length');
+  assert.strictEqual(C.better(ev, cur, [{ id: 2, title: 'I.T.', year: 2016, runtime: 95 * 60 }], same).id, 2);
+  // Ten minutes longer (8%): a longer cut, maybe — nothing said either way.
+  assert.strictEqual(C.contradicted(C.fit({ name: 'It', year: 2017, length: 145 * 60 }, cur, same)), '');
   const ev2 = { name: 'The Gate', year: 0, length: 80 * 60 };
   const cur2 = { id: 1, title: 'The Gate', year: 2016, runtime: 140 * 60 };
-  const right2 = { id: 2, title: 'The Gate', year: 1987, runtime: 85 * 60 };
+  const right2 = { id: 2, title: 'The Gate', year: 1987, runtime: 81 * 60 };
   assert.strictEqual(C.contradicted(C.fit(ev2, cur2, same)), 'length');
   assert.strictEqual(C.better(ev2, cur2, [right2], same).id, 2);
   // The length alone never beats a cast that agrees.

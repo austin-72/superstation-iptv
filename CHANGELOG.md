@@ -3,6 +3,52 @@
 What was changed and fixed, in more detail than the README (which says what the app does). Newer first; versions
 from 2.7 on are named. The release notes on GitHub list each version.
 
+## 2.8.17
+
+- **Each copy of a film is measured against its TMDB running time.** Most providers' film info says how long the file
+  itself runs (their own scan of it), and in practice 88% of copies run within two minutes of TMDB's time. A copy now
+  counts as the film when it runs within **2 minutes** of it (Admin → Recommendations → Corrected matches; 1 to 10
+  minutes; a PAL copy's 4% shorter running counts too). What a player sees a copy run, once it's playing, is kept and
+  counts for more than the provider's word.
+- **The copy closest to TMDB's length plays first.** Copies that match go first, then those not known yet, then those a
+  few minutes off (another edition, other credits), and last those that are clearly something else: far from TMDB's
+  length (another film of the same name), or a few minutes long (a trailer or a broken file — several "Lilo & Stitch",
+  "Kill Bill" and "Tropic Thunder" copies are 2-minute files). The provider's own TMDB number and cast for each copy
+  count as well, where its length isn't known. The quick check of which copies answer (smart failover) puts the clearly
+  wrong ones last too.
+- **A title page says when its details may be wrong**: "These details may not be for this film", with why — none of its
+  copies runs anywhere near TMDB's length ("TMDB's “Godzilla Minus Zero” runs 2 h 15 min, but the copy here runs
+  1 h 26 min"), the provider's cast isn't TMDB's, or it's another name from another year — and **Find the right one**.
+  A trailer-length copy, or one a few minutes off, doesn't count against the details. A match picked by hand never
+  warns. On the lists as they are, 13 of the 394 films whose copies are known would warn, nearly all wrong matches.
+- **The Details tab lists how long the copies run**, and whether they match TMDB's time.
+- **"Wrong poster or details?" shows each option's running time** and marks the ones that run as long as the copies here
+  ("Same length as the copies here"), first.
+- **The TMDB corrections go by what the copies agree on**: the length most of them run (or one that matches TMDB's,
+  which settles it), and the TMDB number most of their providers give. "Brother" (2003), matched to "Brother Bear", has
+  copies that run 120 minutes and say they're another film — that's corrected now; "The Odyssey", 20 copies of the long
+  film and 2 of an 86-minute namesake, stays as it is. Lengths 15% or more off TMDB's count as another film, a match
+  within the minutes above as the same.
+- **A copy that's another film of the same name becomes a title of its own, as that film.** When some copies of a
+  title run as long as its TMDB entry and others clearly don't (by length, or the provider's cast), TMDB is asked what
+  the others are: their provider's own TMDB number when that film runs as long as the copy, or else the one entry of
+  that name that does (and whose cast isn't another's). "The Odyssey" (2026): its two 86-minute copies are another
+  "The Odyssey" and get their own title; "Peter Pan" (1953): a copy that runs 113 minutes is the 2003 film, and joins
+  it. Two entries that fit just as well, and nothing is moved. Listed in Admin → Recommendations → Corrected matches
+  ("A copy that runs 1 h 26 min is “The Odyssey” (2026), not …"), with Undo, which puts the copy back for good.
+  (A title none of whose copies match is a matter for the TMDB checks above, which look for the right entry for the
+  whole title the same way: by its copies' length, its cast, its name and year, and the providers' TMDB numbers.)
+- **Every film's copies are looked up in the background** (on by default; Admin → Recommendations → Corrected matches):
+  one provider request every few seconds, films with several copies and the most popular first, each copy once a week,
+  so lengths are known before anyone opens the film. A film someone opens or plays is looked up straight away.
+
+- **A TV remote can change the TV guide's group (and any drop-down list).** A TV's browser — or an app someone wrapped
+  around the site for their TV — often can't open a page's drop-down list with the remote, so the guide stayed on All
+  channels. OK on a drop-down list now opens the app's own menu of its choices, which the remote walks; and on a TV the
+  arrows move on from a drop-down instead of changing it (and the page) with every press. An Android device that's
+  neither a phone nor touched (a TV box, or a home-made TV app whose web view says only "Android") now counts as a TV,
+  with TV mode on, as do SHIELD, Chromecast and Mi boxes by name.
+
 ## 2.8.16
 
 - **A corrected TMDB match can't move a whole title to a namesake any more.** "The Odyssey" (2026) was moved from the

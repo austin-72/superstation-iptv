@@ -363,6 +363,7 @@ PP.load = function (it, opts) {
       if (V.crumb) V.crumb('player', 'started via ' + a.via + (a.kind || a.mode ? ' (' + (a.kind || a.mode) + ')' : '') + ' in ' + (Date.now() - t0) + ' ms');
       self._afterStart();
       self._lengthCheck(token);
+      self._lengthReport(token);
     }, function (e) {
       clearTimeout(warmT);
       if (token !== self.token) return;
@@ -481,7 +482,24 @@ PP._sources = function (it, token, opts) {
  * Error reports), where that copy can be hidden for everyone. Once per film on this device. (Not for a title without
  * TMDB's details, nor a short one — a film's length is only known well enough from TMDB.)
  */
-var lenChecked = {};
+var lenChecked = {}, lenSent = {};
+/**
+ * Tells the server how long this copy of a film or an episode really runs, once it's playing (a server conversion's
+ * length, or the browser's own for a file it plays): copies are put in order by how close they run to TMDB's length.
+ */
+PP._lengthReport = function (token) {
+  var self = this, it = this.it;
+  if (!it || (it.t !== 'movie' && it.t !== 'episode') || !this.vod) return;
+  var key = it.k + '|' + this.alt;
+  if (lenSent[key]) return;
+  setTimeout(function () {
+    if (token !== self.token || self.it !== it) return;
+    var v = self.video, real = self.sessionDuration || (!self.mb && isFinite(v.duration) && v.duration > 0 ? v.duration : 0);
+    if (!(real > 60)) return;
+    lenSent[key] = 1;
+    V.api('/api/play/length', { body: { k: it.k, sk: it.sk || undefined, alt: self.alt, d: Math.round(real) } }).catch(function () {});
+  }, 8000);
+};
 /**
  * Is a film's file too far from its running time (TMDB's) to be that film? A real copy is within a few percent — a
  * European TV copy plays 4% fast, some drop the credits — so under 80% isn't it. Longer is allowed more: an extended or

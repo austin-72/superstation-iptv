@@ -141,8 +141,13 @@ V.device = (function () {
   var id = V.ls.get('device');
   if (!id) { id = V.uid(); V.ls.set('device', id); }
   var ua = navigator.userAgent;
-  var tv = /Tizen|SMART-TV|SmartTV|Web0S|webOS|NetCast|BRAVIA|AFT[A-Z]|CrKey|GoogleTV|Android TV|HbbTV|Viera|Roku|PlayStation|Xbox/i.test(ua);
   var touch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  // A TV by name — or an Android device that's neither a phone nor touched: a TV box, or an app someone wrapped around
+  // the site for their TV, whose web view says only "Android" (a tablet has a touch screen). Or a device with no
+  // pointer at all.
+  var tv = /Tizen|SMART-TV|SmartTV|Web0S|webOS|NetCast|BRAVIA|AFT[A-Z]|CrKey|GoogleTV|Google TV|Android TV|AndroidTV|HbbTV|Viera|Roku|PlayStation|Xbox|SHIELD|Chromecast|MiTV|MIBOX|BeyondTV/i.test(ua) ||
+    (/Android/.test(ua) && !/Mobile/.test(ua) && !touch) ||
+    (!touch && !!window.matchMedia && matchMedia('(any-pointer: none)').matches);
   var os = /iPhone/.test(ua) ? 'iPhone' : /iPad|Macintosh.*Mobile/.test(ua) ? 'iPad' : /Android/.test(ua) ? (/Mobile/.test(ua) ? 'Android phone' : tv ? 'Android TV' : 'Android tablet') : tv ? 'TV' : /Macintosh/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : /CrOS/.test(ua) ? 'Chromebook' : 'Computer';
   var br = /Edg\//.test(ua) ? 'Edge' : /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
   return { id: id, tv: tv, touch: touch, ios: /iPhone|iPad/.test(ua) || (/Macintosh/.test(ua) && touch), name: V.ls.get('deviceName') || (br ? br + ' on ' + os : os) };
@@ -385,6 +390,31 @@ V.menu = function (anchor, items, o) {
   m._anchor = anchor;
   setTimeout(function () { var f = m.querySelector('.pm-i'); if (f) f.focus(); }, 20);
   return m;
+};
+/**
+ * A drop-down list (<select>) as one of the app's menus, for a TV remote: a TV's browser — or an app wrapped around
+ * the site — often can't open a page's drop-down list with the remote, or walks it without saying so. OK on one opens
+ * this instead: its choices (under their headings), the current one ticked and focused; picking one sets the list and
+ * tells the page, as choosing in the drop-down would. (Not inside a dialog: the menu would be drawn behind it.)
+ */
+V.selectMenu = function (sel) {
+  if (!sel || sel.disabled || sel.closest('dialog')) return false;
+  var items = [], cur = null;
+  Array.prototype.forEach.call(sel.children, function (n) {
+    var add = function (o) {
+      if (o.disabled || o.hidden) return;
+      var it = { label: o.textContent, checked: o.selected, fn: function () { if (sel.value === o.value) return; sel.value = o.value; var ev; try { ev = new Event('change', { bubbles: true }); } catch (x) { ev = document.createEvent('Event'); ev.initEvent('change', true, false); } sel.dispatchEvent(ev); } };
+      if (o.selected) cur = items.length;
+      items.push(it);
+    };
+    if (n.tagName === 'OPTGROUP') { items.push({ header: n.label }); Array.prototype.forEach.call(n.children, add); } else if (n.tagName === 'OPTION') add(n);
+  });
+  if (!items.length) return false;
+  var m = V.menu(sel, items, { align: 'left' });
+  m.classList.add('pm-select');
+  m.setAttribute('aria-label', sel.getAttribute('aria-label') || 'Choose');
+  if (cur !== null) setTimeout(function () { var b = m.querySelector('[data-i="' + cur + '"]'); if (b) { b.focus(); b.scrollIntoView({ block: 'nearest' }); } }, 30);
+  return true;
 };
 V.closeMenus = function () { V.$$('.popmenu').forEach(function (m) { var a = m._anchor; m.remove(); if (a && document.activeElement === document.body) a.focus(); }); };
 // (Without Pointer Events — iPhones before iOS 13, older TVs — a press outside is a mousedown or a touchstart.)

@@ -103,7 +103,7 @@ test('a film whose file runs far from TMDB’s length moves to the entry of that
   const it = { k: 'G', t: 'movie', n: 'The Gate', y: 0, d: 0 };
   const tmdb = fakeTmdb({
     '/search/movie': { results: [{ id: 1, title: 'The Gate' }, { id: 2, title: 'The Gate' }] },
-    '/movie/2': film(2, 'The Gate', 1987, 85),
+    '/movie/2': film(2, 'The Gate', 1987, 83),
   }, { G: { id: 1, type: 'movie' } }, { G: { tmdb: 1, title: 'The Gate', y: 2016, d: 140 * 60 } });
   // Nobody has watched it: nothing to go by.
   assert.strictEqual((await run([it], deps(tmdb, fixes))).asked, 0);
@@ -116,8 +116,8 @@ test('a film whose file runs far from TMDB’s length moves to the entry of that
 
 test('the evidence is only the provider’s own', () => {
   const d = { cast: 'A Person, B Person', d: 5400 };
-  assert.deepStrictEqual(evidence({ t: 'movie', n: 'X (2001)', y: 2001, cast: 'A Person, B Person', d: 5400 }, d, 2001, 0), { name: 'X', year: 2001, cast: '', length: 0 });
-  assert.deepStrictEqual(evidence({ t: 'movie', n: 'X', cast: 'C Person', d: 95 }, d, 0, 0), { name: 'X', year: 0, cast: 'C Person', length: 5700 });
+  assert.deepStrictEqual(evidence({ t: 'movie', n: 'X (2001)', y: 2001, cast: 'A Person, B Person', d: 5400 }, d, 2001, 0), { name: 'X', year: 2001, cast: '', length: 0, tol: 120 });
+  assert.deepStrictEqual(evidence({ t: 'movie', n: 'X', cast: 'C Person', d: 95 }, d, 0, 0), { name: 'X', year: 0, cast: 'C Person', length: 5700, tol: 120 });
   assert.strictEqual(evidence({ t: 'movie', n: 'X', d: 95 }, d, 0, 4000).length, 4000, 'the real length first');
   assert.strictEqual(evidence({ t: 'show', n: 'X', d: 95 }, d, 0, 4000).length, 0, 'not for a series');
 });
@@ -155,4 +155,20 @@ test('one copy of many is no evidence for the title — and a correction a rule 
   assert.strictEqual(tmdb.map.data.m.W.id, 406997, '“Wonder” (not “Wonder Woman”) stays corrected');
   assert.ok(!fixes.get(keep).undone);
   assert.strictEqual((await run([it], deps(tmdb, fixes))).putBack, 0, 'only once');
+}));
+
+test('the copies’ own lengths and TMDB numbers: what most of them say, not one of them', () => withFixes(async (fixes) => {
+  // "Brother" (2003) matched to "Brother Bear" (85 min): its three copies run 120 minutes and their providers say 996569.
+  const it = { k: 'BR', t: 'movie', n: 'Brother', y: 2003, alts: [{ u: 'a' }, { u: 'b' }] };
+  const copies = [{ len: 7200, tmdb: 996569 }, { len: 7210, tmdb: 996569 }, { len: 7190, tmdb: 0 }];
+  const tmdb = fakeTmdb({ '/movie/996569': film(996569, 'Brother', 2003, 120) }, { BR: { id: 10009, type: 'movie' } }, { BR: { tmdb: 10009, title: 'Brother Bear', y: 2003, d: 85 * 60 } });
+  const r = await run([it], deps(tmdb, fixes, { copies: () => copies }));
+  assert.strictEqual(r.fixed, 1);
+  assert.strictEqual(tmdb.map.data.m.BR.id, 996569);
+  // "The Odyssey": 20 copies run 173 minutes, 2 run 86 (and say the namesake's number): the match stays, nothing asked.
+  const od = { k: 'OD', t: 'movie', n: 'The Odyssey', y: 2026, alts: Array.from({ length: 21 }, () => ({ u: 'x' })) };
+  const ocopies = Array.from({ length: 20 }, () => ({ len: 10380, tmdb: 1368337 })).concat([{ len: 5163, tmdb: 1698863 }, { len: 5170, tmdb: 1698863 }]);
+  const t2 = fakeTmdb({}, { OD: { id: 1368337, type: 'movie' } }, { OD: { tmdb: 1368337, title: 'The Odyssey', y: 2026, d: 10380 } });
+  const r2 = await run([od], deps(t2, fixes, { copies: () => ocopies }));
+  assert.deepStrictEqual([r2.asked, r2.fixed], [0, 0]);
 }));

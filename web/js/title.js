@@ -164,9 +164,9 @@ V.route('title', function (view, r) {
   });
 
   // ---- Details: the basics here, TMDB's facts added by titlemore.js (view._tpFacts)
-  var baseFacts = [];
+  var baseFacts = [], baseExtra = [];
   var drawFacts = function () {
-    var rows = baseFacts.concat(view._tpFacts || []);
+    var rows = baseFacts.concat(baseExtra, view._tpFacts || []);
     V.$('.tp-facts', view).innerHTML = rows.map(function (x) { return '<div><dt>' + x[0] + '</dt><dd>' + x[1] + '</dd></div>'; }).join('');
   };
   view._tpDrawFacts = drawFacts;
@@ -211,6 +211,8 @@ V.route('title', function (view, r) {
     if (S.settings.tmdb && !S.profile.kids) links.innerHTML = '<button class="linkish" data-fix>' + (d.fixed ? 'Details corrected by your household · change' : 'Wrong poster or details?') + '</button>';
     var fx = V.$('[data-fix]', view);
     if (fx) fx.onclick = function () { V.fixDetails(it, d); };
+    // Do its copies (and the provider's cast) fit these TMDB details? Said on the page when they may be another's.
+    if (S.settings.tmdb && (it.t === 'movie' || it.t === 'show')) V.titleFit(view, it, d, function (rows) { baseExtra = rows; drawFacts(); });
     if (d.tr && V.ytId(d.tr)) { trailer = d.tr; drawActs(it._eps || S.epsByShow.get(it.k)); }
     // No trailer from the provider: TMDB's, when there's one.
     else if (S.settings.tmdb && !V.areaOff('trailers') && (it.t === 'movie' || it.t === 'show')) V.api('/api/trailers?k=' + encodeURIComponent(it.k)).then(function (t) {
@@ -422,6 +424,39 @@ V.drawCollection = function (box, it) {
   }).catch(function () {});
 };
 
+// ---------------------------------------------------------------- do the details fit what's here?
+/**
+ * The server measures a title's copies against its TMDB details (/api/title/:k/fit): each copy's length against TMDB's
+ * running time, the provider's cast against TMDB's, the name and year. When they don't fit, the page says its details
+ * may be another film's or series' — with a way to pick the right one. The Details tab lists how long the copies run.
+ * facts(rows): rows for the Details tab.
+ */
+V.titleFit = function (view, it, d, facts) {
+  V.api('/api/title/' + encodeURIComponent(it.k) + '/fit').then(function (r) {
+    if (!r || !view.isConnected) return;
+    var known = (r.copies || []).filter(function (c) { return c.len > 0; });
+    if (known.length && r.tmdb && r.tmdb.d && facts) {
+      var ok = known.filter(function (c) { return c.cls === 'match'; }).length;
+      var lens = known.map(function (c) { return V.fmtLen(c.len); }).filter(function (x, i, a) { return a.indexOf(x) === i; }).slice(0, 4);
+      facts([['Copies', V.esc(known.length === 1 ? 'Runs ' + lens[0] : V.plural(known.length, 'copy', 'copies') + ' · ' + lens.join(', ')) +
+        '<span class="dim small"> · ' + (ok === known.length ? (known.length === 1 ? 'the same as' : 'all the same as') : ok ? ok + ' the same as' : 'none the same as') + ' TMDB’s ' + V.esc(V.fmtLen(r.tmdb.d)) +
+        (ok && ok < known.length ? ' (those play first)' : '') + '</span>']]);
+    }
+    if (r.level !== 'warn' || V.$('.tp-fitwarn', view)) return;
+    var box = document.createElement('div');
+    box.className = 'tp-fitwarn';
+    box.setAttribute('role', 'note');
+    box.innerHTML = V.icon('info') + '<div><b>These details may not be for this ' + (it.t === 'show' ? 'series' : 'film') + '</b>' +
+      '<span class="small">' + (r.reasons || []).map(V.esc).join(' ') + '</span>' +
+      (S.profile.kids ? '' : '<button class="linkish" data-fitfix>Find the right one</button>') + '</div>';
+    var after = V.$('.tp-credits', view);
+    if (!after) return;
+    after.parentNode.insertBefore(box, after.nextSibling);
+    var b = V.$('[data-fitfix]', box);
+    if (b) b.onclick = function () { V.fixDetails(it, d); };
+  }).catch(function () {});
+};
+
 // ---------------------------------------------------------------- "Wrong poster or details?"
 V.fixDetails = function (it, d) {
   var load = function (dlg, q) {
@@ -429,10 +464,13 @@ V.fixDetails = function (it, d) {
     list.innerHTML = '<div class="spinner"></div>';
     V.api('/api/item/' + encodeURIComponent(it.k) + '/matches' + (q ? '?q=' + encodeURIComponent(q) : '')).then(function (r) {
       if (!r.options.length) { list.innerHTML = '<p class="dim">Nothing found. Try another title below.</p>'; return; }
+      var head = r.copyLen ? '<p class="dim small fix-len">The copies here run ' + V.fmtLen(r.copyLen) + '.</p>' : '';
       list.innerHTML = r.options.map(function (o, i) {
-        return '<button class="fix-opt' + (o.current ? ' cur' : '') + '" data-i="' + i + '"><span class="fo-art">' + (o.poster ? '<img src="' + V.esc(o.poster) + '" alt="" loading="lazy" referrerpolicy="no-referrer" data-rm>' : '') + '</span><span class="fo-b"><b>' + V.esc(o.title) + '</b> <span class="dim">' + (o.year || '') + ' · ' + (o.type === 'tv' ? 'Series' : 'Movie') + (o.current ? ' · shown now' : '') + '</span>' +
+        return '<button class="fix-opt' + (o.current ? ' cur' : '') + '" data-i="' + i + '"><span class="fo-art">' + (o.poster ? '<img src="' + V.esc(o.poster) + '" alt="" loading="lazy" referrerpolicy="no-referrer" data-rm>' : '') + '</span><span class="fo-b"><b>' + V.esc(o.title) + '</b> <span class="dim">' + (o.year || '') + ' · ' + (o.type === 'tv' ? 'Series' : 'Movie') + (o.runtime ? ' · ' + V.fmtLen(o.runtime) : '') + (o.current ? ' · shown now' : '') + '</span>' +
+          (o.fits ? '<span class="badge fo-fits">' + V.icon('check') + ' Same length as the copies here</span>' : '') +
           (o.original && o.original !== o.title ? '<span class="dim small">' + V.esc(o.original) + '</span>' : '') + '<span class="small clamp3">' + V.esc(o.plot || 'No description.') + '</span></span></button>';
       }).join('');
+      if (head) list.insertAdjacentHTML('afterbegin', head);
       list.onclick = function (e) {
         var b = e.target.closest('[data-i]');
         if (!b) return;

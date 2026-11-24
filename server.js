@@ -52,6 +52,9 @@ const { Bans, norm: ipNorm } = require('./lib/bans');
 const { BadCopies, copyId } = require('./lib/badcopies');
 const { Tmdb, ownYear: tmdbOwnYear, yearConflict: tmdbYearConflict } = require('./lib/tmdb');
 const { TmdbFixes, run: runTmdbFix } = require('./lib/tmdbfix');
+const CopyFit = require('./lib/copyfit');
+const { CopySplits, run: runCopySplits } = require('./lib/copysplit');
+const { castVerdict } = require('./lib/tmdbcheck');
 const { Recs } = require('./lib/recs');
 const { Markers } = require('./lib/markers');
 const { ConnTest } = require('./lib/conntest');
@@ -177,6 +180,9 @@ const lists = new Lists({
 catalog = new Catalog({ lists, epg, getSettings: settings });
 // (Copies that play something else, hidden by the admin: lib/badcopies.js.)
 catalog.isBadCopy = (l, t, u) => badCopies.has(l, t, u);
+// Copies that are another film of the same name, each a title of its own as that film (lib/copysplit.js).
+const copySplits = new CopySplits(D);
+catalog.copySplit = (l, t, u) => copySplits.of(copyId(l, t, u));
 catalog.overrides = overrides;
 catalog.decorate = (it) => applyMeta(it, tmdb.meta.data.m[it.k]); // (applyMeta and tmdb: further down, used once built)
 // Smarter categories (lib/smartcats.js): each item's, worked out when the catalogue is built (and again when the
@@ -365,7 +371,7 @@ let builtSig = ''; // what the catalogue in use was made from (catalogInputs at 
 function catalogInputs() {
   const h = crypto.createHash('sha1').update(CODE_SIG);
   const S = settings();
-  h.update(JSON.stringify([S.tidyGroups, S.groupRules, S.hiddenGroups, S.hiddenKeys, S.defaultLangs, S.showUnknownLang, keepSig(), overrides.d, !!S.noAdult, badCopies.sig()]));
+  h.update(JSON.stringify([S.tidyGroups, S.groupRules, S.hiddenGroups, S.hiddenKeys, S.defaultLangs, S.showUnknownLang, keepSig(), overrides.d, !!S.noAdult, badCopies.sig(), copySplits.sig()]));
   for (const l of lists.all().concat(lists.extras || [])) {
     const { status, account, ...conf } = l; // (how its last refresh went doesn't change what's in it)
     h.update(JSON.stringify(conf));
@@ -1302,7 +1308,22 @@ route('GET', '/api/item/:k/matches', async (req, res, p, q, ctx) => {
   if (prof.kids) throw new HttpError(403, 'Ask a grown-up to fix this one.');
   const it = item(ctx, p.k);
   if (!tmdb.enabled()) throw new HttpError(400, 'The admin hasn’t added a TMDB key, so details can’t be looked up.');
-  return { current: tmdb.map.data.m[it.k] || null, options: await tmdb.candidates(it, String(q.get('q') || '').slice(0, 100)) };
+  const options = await tmdb.candidates(it, String(q.get('q') || '').slice(0, 100));
+  // A film: each option's running time, and which run as long as the copies here do (most of them) — likely the one.
+  let copyLen = 0;
+  if (it.t === 'movie') {
+    await surveyCopies(it, 4000).catch(() => {});
+    copyLen = CopyFit.consensus(goodCopies(it).map((alt) => copyFacts(it, alt).len), 0, lenTol());
+    await Promise.all(options.filter((o) => o.type === 'movie').map(async (o) => {
+      try {
+        const j = await tmdb.get(`/movie/${o.id}`, { append_to_response: 'credits,release_dates,keywords,watch/providers' });
+        o.runtime = j && j.runtime ? j.runtime * 60 : 0;
+        if (copyLen && o.runtime) o.fits = CopyFit.classify(copyLen, o.runtime, lenTol()) === 'match';
+      } catch {}
+    }));
+    options.sort((a, b) => b.current - a.current || (!!b.fits - !!a.fits));
+  }
+  return { current: tmdb.map.data.m[it.k] || null, options, copyLen };
 });
 route('POST', '/api/item/:k/match', async (req, res, p, q, ctx) => {
   const prof = requireProfile(ctx);
@@ -1835,16 +1856,11 @@ async function sniffCodecs(it, alt = -1) {
 async function copyCodecs(it, alt = -1) {
   const a = alt >= 0 && it.alts && it.alts[alt] ? it.alts[alt] : null;
   if (it.t === 'episode') return (a ? a.cx : it.cx) || null;
-  if (it.t !== 'movie') return null;
-  const url = a ? a.u : it.u;
-  const m = /\/movie\/[^/]+\/[^/]+\/(\d+)\.\w+(?:\?|$)/.exec(url || '');
-  const lid = a ? a.l : (it.xt && it.xt.l) || it.src;
-  const id = a ? m && m[1] : (it.xt && it.xt.id) || (m && m[1]);
-  const l = lid && lists.all().find((x) => x.id === lid);
-  if (!id || !l || l.type !== 'xtream') return null;
-  const key = `${lid}:${id}`;
+  const ref = copyVodRef(it, alt);
+  if (!ref) return null;
+  const key = `${ref.lid}:${ref.id}`;
   if (codecMemo.has(key)) return codecMemo.get(key);
-  const info = await lists.xtVod(lid, id);
+  const info = await vodInfo(ref.lid, ref.id);
   const v = (info && info.video) || {}, au = (info && info.audio) || {};
   const cx = v.codec_name ? { v: String(v.codec_name).toLowerCase(), a: String(au.codec_name || '').toLowerCase(), pix: String(v.pix_fmt || '') } : null;
   if (cx && v.color_transfer) cx.tr = String(v.color_transfer).slice(0, 20); // (HDR or not, when the provider says)
@@ -1852,6 +1868,69 @@ async function copyCodecs(it, alt = -1) {
   codecMemo.set(key, cx);
   return cx;
 }
+// ---- each copy's length against TMDB's: which copies are the film its details are for (lib/copyfit.js)
+const copyLens = new CopyFit.CopyLens(D);
+/** How close a copy's length must be to TMDB's to count as the same film (Admin → Recommendations; seconds). */
+const lenTol = () => Math.min(10, Math.max(1, Number(settings().lengthTolerance) || 2)) * 60;
+const copyUrl = (it, alt) => (alt >= 0 && it.alts && it.alts[alt] ? it.alts[alt].u : it.u);
+/** A film copy's place at its provider, when that's an Xtream list (whose film info says how long the file runs). */
+function copyVodRef(it, alt = -1) {
+  if (!it || it.t !== 'movie') return null;
+  const a = alt >= 0 && it.alts && it.alts[alt] ? it.alts[alt] : null;
+  const m = /\/movie\/[^/]+\/[^/]+\/(\d+)\.\w+(?:\?|$)/.exec(copyUrl(it, alt) || '');
+  const lid = a ? a.l : (it.xt && it.xt.l) || it.src;
+  const id = a ? m && m[1] : (it.xt && it.xt.id) || (m && m[1]);
+  const l = lid && lists.all().find((x) => x.id === lid);
+  return id && l && l.type === 'xtream' ? { lid, id: String(id) } : null;
+}
+/** A film's info from its provider (saved for a week): one request at a time for the same copy, whoever asks. */
+const vodAsking = new Map();
+function vodInfo(lid, id) {
+  const k = `${lid}:${id}`;
+  let p = vodAsking.get(k);
+  if (!p) { p = lists.xtVod(lid, id).finally(() => vodAsking.delete(k)); vodAsking.set(k, p); }
+  return p;
+}
+/** The TMDB details a film's copies are measured against — only once they're for its current match. */
+function matchMeta(it) {
+  const m = tmdb.meta.data.m[it.k], mt = tmdb.map.data.m[it.k];
+  return m && mt && mt.id && String(m.tmdb) === String(mt.id) ? m : null;
+}
+/**
+ * What's known about one copy, without asking its provider: how long it runs (as a player saw it, or as its provider
+ * says), against TMDB's length; the TMDB number and year the provider gives it; whether its cast is TMDB's.
+ * → { alt, len, real (seen playing), cls, tmdb, y, castV, s (lower: likelier the film; WRONG and over: something else) }
+ */
+function copyFacts(it, alt, m = matchMeta(it)) {
+  const ref = copyVodRef(it, alt);
+  const pf = (ref && CopyFit.factsOf(lists.xtVodCached(ref.lid, ref.id))) || { len: 0, tmdb: 0, y: 0, cast: '' };
+  const copy = copyId(srcList(it, alt), it.t, copyUrl(it, alt));
+  const real = copyLens.get(copy);
+  const len = real || pf.len;
+  const tm = it.t === 'movie' ? m : null;
+  const f = {
+    alt, copy, cast: pf.cast || '', len, real: !!real, cls: tm ? CopyFit.classify(len, tm.d, lenTol()) : '', tmdb: pf.tmdb, y: pf.y,
+    castV: tm && pf.cast && tm.cast ? castVerdict(pf.cast, String(tm.cast).split(/\s*,\s*/)) : '',
+  };
+  f.s = CopyFit.copyScore(f, tm ? { id: tm.tmdb, y: tm.y } : null);
+  return f;
+}
+/**
+ * Asks the providers for the film info of a title's copies they haven't been asked about: one request at a time per
+ * provider list, the lists at once. Waits at most ms (the rest carry on, for next time).
+ */
+function surveyCopies(it, ms = 8000) {
+  if (!it || it.t !== 'movie') return Promise.resolve();
+  const by = new Map();
+  for (const alt of goodCopies(it)) {
+    const r = copyVodRef(it, alt);
+    if (r && !lists.xtVodCached(r.lid, r.id)) (by.get(r.lid) || by.set(r.lid, []).get(r.lid)).push(r);
+  }
+  if (!by.size) return Promise.resolve();
+  const work = Promise.all([...by.values()].map(async (rs) => { for (const r of rs.slice(0, 40)) await vodInfo(r.lid, r.id).catch(() => null); }));
+  return Promise.race([work, new Promise((ok) => { const t = setTimeout(ok, ms); if (t.unref) t.unref(); })]);
+}
+
 /**
  * How well this browser can play one copy straight from the provider: 0 as it is, 1 probably as it is (an MKV
  * Chrome/Edge plays, MPEG-TS), 2 by converting it in the browser, 3 only by converting on the server.
@@ -1891,11 +1970,17 @@ route('POST', '/api/play/sources', async (req, res, p, q, ctx) => {
   // (the same episode is often an MP4 on one provider and an MKV with Dolby sound on another).
   const caps = b.caps && typeof b.caps === 'object' ? b.caps : null;
   const vodItem = it.t === 'movie' || it.t === 'episode';
+  // (And how long each copy of a film runs, from its provider's info, while that's asked for anyway: the copies that
+  // run as long as TMDB's entry go first — the others are likely another film, another cut, or a trailer.)
+  const survey = it.t === 'movie' && copies.length > 1 ? surveyCopies(it, 2500).catch(() => {}) : null;
   const cxs = caps && vodItem && copies.length > 1
     ? await Promise.race([Promise.all(copies.map((alt) => copyCodecs(it, alt).catch(() => null))), new Promise((r) => setTimeout(() => r(copies.map(() => null)), 2500))])
     : copies.map(() => null);
   // Priority profiles: when a provider has no free connection, a priority viewer takes one from someone on a standard
   // profile (their player stops and says who needed it). Standard viewers can't take one from a priority viewer.
+  if (survey) await survey;
+  const mm = matchMeta(it);
+  const facts = new Map(copies.map((alt) => [alt, copyFacts(it, alt, mm)]));
   const mePri = !!prof.priority;
   // (The films the stream relay shares connections for count as one entry: its plays are in `viewers`.)
   const members = (c) => (c.relayShared ? c.viewers : [c]);
@@ -1934,12 +2019,16 @@ route('POST', '/api/play/sources', async (req, res, p, q, ctx) => {
       fmt: caps && vodItem ? playScore(url, cxs[copies.indexOf(alt)], caps) : 0,
       by: busy || bump.length ? users.map(who) : [],
       bump, locked,
+      fit: (({ cls, len, s: sc }) => ({ cls, len, s: sc }))(facts.get(alt)),
     });
   }
-  // Free first (a copy that needs someone bumped after a truly free one); then the admin's preferred backup and copies
-  // that work (channel health); then ones this page can play directly; then the list order.
+  // Free first (a copy that needs someone bumped after a truly free one); copies that are likely something else (their
+  // length far from TMDB's, a 2-minute clip) after the rest; then the admin's preferred backup and copies that work
+  // (channel health) and quick providers; then the copies closest to TMDB's length (and whose provider's TMDB number
+  // and cast agree); then ones this page can play directly; then the list order.
   const hr = p9Hooks.rank ? p9Hooks.rank(it) : null;
-  const order = out.slice().sort((x, y) => (x.busy - y.busy) || (!!x.bump.length - !!y.bump.length) || (hr ? hr(x.alt) - hr(y.alt) : 0) || (slowList(x.list) - slowList(y.list)) || (x.mixed - y.mixed) || (x.proxy - y.proxy) || (x.fmt - y.fmt) || (copies.indexOf(x.alt) - copies.indexOf(y.alt)));
+  const wrong = (x) => (x.fit.s >= CopyFit.WRONG ? 1 : 0), fitRank = (x) => Math.round(x.fit.s * 2);
+  const order = out.slice().sort((x, y) => (x.busy - y.busy) || (!!x.bump.length - !!y.bump.length) || (wrong(x) - wrong(y)) || (hr ? hr(x.alt) - hr(y.alt) : 0) || (slowList(x.list) - slowList(y.list)) || (fitRank(x) - fitRank(y)) || (x.mixed - y.mixed) || (x.proxy - y.proxy) || (x.fmt - y.fmt) || (copies.indexOf(x.alt) - copies.indexOf(y.alt)));
   const allBusy = out.every((x) => x.busy);
   // About to start on an account whose films the relay shares: it hears about the new viewer now, not in a few seconds.
   if (!allBusy && out.some((x) => !x.busy && (use.get(x.list) || []).some((c) => c.relayShared))) relayFinished.poke(true);
@@ -2035,11 +2124,88 @@ route('POST', '/api/play/race', async (req, res, p, q, ctx) => {
   done = true;
   for (const alt of asked) out.push({ alt, ok: false, ms: Date.now() - t0, err: 'Slow to answer', slow: true });
   const rank = (e) => (e.ok ? 0 : e.untested ? 1 : e.busy ? 2 : 3);
-  out.sort((x, y) => rank(x) - rank(y) || (x.ms || 0) - (y.ms || 0));
+  // (Of those that answer, a copy that's likely something else — its length far from TMDB's — after the rest.)
+  const mm = matchMeta(it);
+  const wrong = (e) => (copyFacts(it, e.alt, mm).s >= CopyFit.WRONG ? 1 : 0);
+  out.sort((x, y) => rank(x) - rank(y) || wrong(x) - wrong(y) || (x.ms || 0) - (y.ms || 0));
   // (A one-connection account: give the provider a moment to let the look's connection go before the device opens its own.)
   if (out[0] && out[0].ok && oneConnection(it, out[0].alt)) await new Promise((ok) => setTimeout(ok, 1200));
   return { order: out.map(({ list, ...e }) => e) };
 });
+// A player says how long a copy really runs (a film or an episode, once it has started): it counts for more than the
+// provider's word when copies are put in order, and in the TMDB checks.
+route('POST', '/api/play/length', async (req, res, p, q, ctx) => {
+  requireProfile(ctx);
+  const b = await readJSON(req);
+  const it = await itemAsync(ctx, String(b.k || ''), b.sk);
+  if (it.t !== 'movie' && it.t !== 'episode') return { ok: false };
+  const alt = Number.isInteger(b.alt) && b.alt >= -1 && b.alt < ((it.alts || []).length) ? b.alt : -1;
+  const d = Number(b.d);
+  return { ok: copyLens.set(copyId(srcList(it, alt), it.t, copyUrl(it, alt)), d) };
+});
+/**
+ * Does a title fit its TMDB details? Its title page asks, and says so when they may be another film's or series': none
+ * of its copies runs as long as TMDB's entry (within the admin's minutes), the provider's cast isn't TMDB's, or it's
+ * another name from another year. Asks the providers about copies not looked at yet (at most 8 s).
+ * → { level: 'ok' | 'warn' | '', reasons, tmdb: { title, y, d }, copies: [{ alt, len, cls }], tol (minutes) }
+ */
+route('GET', '/api/title/:k/fit', async (req, res, p, q, ctx) => {
+  requireProfile(ctx);
+  const it = item(ctx, p.k);
+  if (!tmdb.enabled() || (it.t !== 'movie' && it.t !== 'show')) return { level: '', reasons: [], copies: [] };
+  if (it.t === 'movie') await surveyCopies(it, 8000).catch(() => {});
+  const m = matchMeta(it), mt = tmdb.map.data.m[it.k] || {};
+  const facts = it.t === 'movie' ? goodCopies(it).map((alt) => copyFacts(it, alt, m)) : [];
+  const v = CopyFit.verdict({ kind: it.t, name: it.n, year: tmdbOwnYear(it), cast: it.cast && m && String(it.cast) !== String(m.cast || '') ? it.cast : '', manual: !!mt.manual }, m, facts, Titles.sameTitle, lenTol());
+  return {
+    ...v, tol: lenTol() / 60, tmdb: m ? { title: m.title, y: m.y || 0, d: m.d || 0 } : null,
+    copies: facts.map((f) => ({ alt: f.alt, len: f.len, cls: f.cls, real: f.real })),
+  };
+});
+
+// Looking up every film's copies in the background (Admin → Recommendations → Corrected matches): how long each file
+// runs, from its provider's film info, a request every few seconds — the films with several copies first, the most
+// popular first. A copy asked about in the last week isn't asked again. New lengths are then used by the TMDB checks.
+let surveyJob = null, lastSurvey = null, surveyTimer = null;
+function startSurvey(auto = false) {
+  if (surveyJob) return surveyJob.status;
+  if (!catalog || (auto && settings().copySurvey === false)) return null;
+  const films = catalog.items.filter((it) => it.t === 'movie' && copyVodRef(it, -1) || (it.t === 'movie' && it.alts && it.alts.length));
+  films.sort((a, b) => (!!(b.alts && b.alts.length) - !!(a.alts && a.alts.length)) || ((b.pop || 0) - (a.pop || 0)));
+  const job = surveyJob = { status: { running: true, started: Date.now(), total: films.length, done: 0, asked: 0, failed: 0 } };
+  const st = job.status, errs = new Map();
+  (async () => {
+    for (const it of films) {
+      if (surveyJob !== job || (auto && settings().copySurvey === false)) { st.stopped = true; break; }
+      st.done++;
+      for (const alt of goodCopies(it)) {
+        const r = copyVodRef(it, alt);
+        if (!r || lists.xtVodCached(r.lid, r.id) || (errs.get(r.lid) || 0) >= 8) continue;
+        try { await vodInfo(r.lid, r.id); st.asked++; errs.set(r.lid, 0); } catch { st.failed++; errs.set(r.lid, (errs.get(r.lid) || 0) + 1); }
+        await new Promise((ok) => setTimeout(ok, 4000));
+        if (surveyJob !== job) break;
+      }
+      // (Every few hundred new lengths: the TMDB checks go over them.)
+      if (st.asked && st.asked % 500 === 0) scheduleTmdbFix(60e3);
+      if ((st.done & 255) === 0) await new Promise((ok) => setImmediate(ok));
+    }
+  })().catch((e) => { st.error = e.message; }).finally(() => {
+    st.running = false; st.finished = Date.now();
+    lastSurvey = st;
+    if (surveyJob === job) surveyJob = null;
+    if (st.asked) scheduleTmdbFix(60e3);
+  });
+  return st;
+}
+function scheduleSurvey(ms) {
+  clearTimeout(surveyTimer);
+  surveyTimer = setTimeout(() => { try { startSurvey(true); } catch (e) { log('Copy lengths:', e.message); } }, ms);
+  if (surveyTimer.unref) surveyTimer.unref();
+}
+// (Fifteen minutes after start-up, then once a day: new copies, and a week's worth of saved info to renew.)
+scheduleSurvey(15 * 60e3);
+{ const t = setInterval(() => { if (!surveyJob) scheduleSurvey(1000); }, 24 * 3600e3); if (t.unref) t.unref(); }
+
 // Playback statistics: the player says which route it used and for how long (Admin → Statistics).
 route('POST', '/api/stats/play', async (req, res, p, q, ctx) => {
   const prof = requireProfile(ctx);
@@ -2854,7 +3020,7 @@ route('PUT', '/api/admin/settings', async (req, res, p, q, ctx) => {
   if (['everyone', 'admin', 'off'].includes(b.subGen)) s.subGen = b.subGen; // (who may have subtitles made from a film's sound: lib/routes-p13.js)
   if (b.off && typeof b.off === 'object' && !Array.isArray(b.off)) s.off = Object.fromEntries(AREAS.filter((a) => b.off[a] === true).map((a) => [a, true]));
   if (Array.isArray(b.defaultLangs)) s.defaultLangs = b.defaultLangs.map(String);
-  for (const k of ['showUnknownLang', 'adminOnlyProfiles', 'allowDownloads', 'allowParties', 'introDetection', 'tmdbAuto', 'tmdbAutoFix', 'tmdbTitles', 'smartFailover', 'phoneDock', 'tapToPause', 'quickStart', 'warmStart', 'tmdbLangs', 'guestProfile', 'guestKids', 'guestAdult', 'noAdult']) if (k in b) s[k] = !!b[k];
+  for (const k of ['showUnknownLang', 'adminOnlyProfiles', 'allowDownloads', 'allowParties', 'introDetection', 'tmdbAuto', 'tmdbAutoFix', 'copySurvey', 'tmdbTitles', 'smartFailover', 'phoneDock', 'tapToPause', 'quickStart', 'warmStart', 'tmdbLangs', 'guestProfile', 'guestKids', 'guestAdult', 'noAdult']) if (k in b) s[k] = !!b[k];
   if (['', '0', '1', '2', '3'].includes(String(b.guestMaxCert === undefined ? 'x' : b.guestMaxCert))) s.guestMaxCert = String(b.guestMaxCert);
   if (b.guestProfile === false) for (const id of [...accounts.guests.keys()]) accounts.endGuest(id); // (guests turned off: those in now leave)
   // TMDB: each episode's details when a series is opened ('open') or only when fetched here ('off'); its language.
@@ -2866,7 +3032,7 @@ route('PUT', '/api/admin/settings', async (req, res, p, q, ctx) => {
   if ('hwaccel' in b && ['', 'vaapi', 'nvenc', 'qsv', 'videotoolbox'].includes(b.hwaccel)) { s.hwaccel = b.hwaccel; media.hwFailed = false; media.hwCheck = null; }
   if (typeof b.tmdbKey === 'string' && !/^•/.test(b.tmdbKey)) s.tmdbKey = b.tmdbKey.trim();
   num('epgDays', 1, 21); num('epgPastDays', 0, 14); num('epgRefreshHours', 1, 168); num('transcodeCrf', 16, 35); num('transcodeMaxHeight', 240, 2160);
-  num('maxTranscodes', 0, 32); num('maxSessions', 1, 64); num('remuxReadrate', 0, 10);
+  num('maxTranscodes', 0, 32); num('maxSessions', 1, 64); num('remuxReadrate', 0, 10); num('lengthTolerance', 1, 10);
   if (Array.isArray(b.allowedHosts)) s.allowedHosts = b.allowedHosts.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
   if (typeof b.timeZone === 'string') {
     const tz = b.timeZone.trim();
@@ -3308,9 +3474,16 @@ function startTmdbFix(auto = false) {
   Tmdb.job(() => runTmdbFix(items, {
     tmdb, fixes: tmdbFixes, same: Titles.sameTitle, ownYear: tmdbOwnYear, conflict: (it, y) => tmdbYearConflict(it, y),
     realLength: (k) => lengths.get(k) || 0, stop: () => fixJob !== job, status: job.status,
+    // (Each copy's length and the TMDB number its provider gives it, as known — no provider asked: lib/copyfit.js.)
+    copies: (it) => goodCopies(it).map((alt) => copyFacts(it, alt)), tol: lenTol(),
     // (The right entry's details fetched now, so the title shows them as soon as the catalogue is built again.)
     onFix: async (it, pick) => { fixed.push(`${pick.putBack ? 'put back: ' : ''}“${it.n}” → ${pick.title}${pick.year ? ` (${pick.year})` : ''}`); await tmdb.details(it); },
-  })).catch((e) => { job.status.error = e.message; }).finally(() => {
+  })).then(() => fixJob === job && Tmdb.job(() => runCopySplits(items, {
+    // Then copies that are another film of the same name: their own titles, as that film (lib/copysplit.js).
+    tmdb, same: Titles.sameTitle, tol: lenTol(), splits: copySplits, fixes: tmdbFixes, status: job.status, stop: () => fixJob !== job,
+    meta: (it) => matchMeta(it), copies: (it) => goodCopies(it).map((alt) => copyFacts(it, alt)),
+    onSplit: (it, f, pick) => { fixed.push(`a ${CopyFit.fmt(f.len)} copy of “${it.n}” → ${pick.title}${pick.year ? ` (${pick.year})` : ''}`); },
+  }))).catch((e) => { job.status.error = e.message; }).finally(() => {
     job.status.running = false; job.status.finished = Date.now(); job.status.current = '';
     lastFix = job.status;
     if (fixJob === job) fixJob = null;
@@ -3332,13 +3505,18 @@ scheduleTmdbFix(10 * 60e3);
 { const t = setInterval(() => { if (!fixJob) scheduleTmdbFix(1000); }, 6 * 3600e3); if (t.unref) t.unref(); }
 route('GET', '/api/admin/tmdb/fixes', (req, res, p, q, ctx) => {
   requireAdmin(ctx);
-  return { on: settings().tmdbAutoFix !== false, job: fixJob ? fixJob.status : null, last: lastFix, list: tmdbFixes.list.slice(0, 200) };
+  return {
+    on: settings().tmdbAutoFix !== false, job: fixJob ? fixJob.status : null, last: lastFix, list: tmdbFixes.list.slice(0, 200),
+    tol: lenTol() / 60, survey: { on: settings().copySurvey !== false, job: surveyJob ? surveyJob.status : null, last: lastSurvey },
+  };
 });
 route('POST', '/api/admin/tmdb/fixes', (req, res, p, q, ctx) => {
   requireAdmin(ctx);
   if (!tmdb.enabled()) throw new HttpError(400, 'Add a TMDB key first.');
   return { ok: true, job: startTmdbFix(false) };
 });
+route('POST', '/api/admin/tmdb/survey', (req, res, p, q, ctx) => { requireAdmin(ctx); return { ok: true, job: startSurvey(false) }; });
+route('DELETE', '/api/admin/tmdb/survey', (req, res, p, q, ctx) => { requireAdmin(ctx); if (surveyJob) { surveyJob.status.stopped = true; lastSurvey = surveyJob.status; } surveyJob = null; return { ok: true }; });
 route('DELETE', '/api/admin/tmdb/fixes', (req, res, p, q, ctx) => { requireAdmin(ctx); if (fixJob) { fixJob.status.stopped = true; lastFix = fixJob.status; } fixJob = null; return { ok: true }; });
 // Undo: the match it had, kept for good (picked by hand, as far as the checks go: they never touch it again).
 route('POST', '/api/admin/tmdb/fixes/:id/undo', async (req, res, p, q, ctx) => {
@@ -3346,6 +3524,14 @@ route('POST', '/api/admin/tmdb/fixes/:id/undo', async (req, res, p, q, ctx) => {
   const f = tmdbFixes.get(p.id);
   if (!f) throw new HttpError(404, 'That correction isn’t listed any more.');
   if (f.undone) return { ok: true, fix: f };
+  // A copy split off as another film: back to its title, and not split off again.
+  if (f.why === 'copy') {
+    copySplits.off(f.copy);
+    tmdbFixes.mark(f.id, { undone: Date.now() });
+    log(`${a.name} put a copy of “${f.n}” back (it had been taken for ${f.to.title}${f.to.y ? ` (${f.to.y})` : ''})`);
+    if (!tmdbRebuild(3000)) { catalog.metaChanged(); hub.toAll('catalog', { version: catalog.version }); }
+    return { ok: true, fix: f };
+  }
   const it = catalog.get(f.k);
   if (!it) throw new HttpError(404, 'That title isn’t in the catalogue any more.');
   const m = await tmdb.setMatch(it, { id: f.from.id, type: f.from.type });
